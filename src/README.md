@@ -23,3 +23,10 @@ python main_all.py --config config/config_supervised_multimodal_mdsed_diagnoses_
 ```
 python main_all.py --config config/config_supervised_multimodal_mdsed_deterioration_s4.yaml
 ```
+
+## Output and Results
+The results, including model performance metrics and analyses, will be saved automatically in the the current directory.
+
+---
+
+For further inquiries, please open an issue.
