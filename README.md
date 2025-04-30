@@ -53,13 +53,24 @@ for clinically relevant prediction tasks such as diagnoses and deterioration pre
 
 ## Reference
 ```bibtex
-@misc{alcaraz2024mdsedmultimodaldecisionsupport,
-      title={MDS-ED: Multimodal Decision Support in the Emergency Department -- a Benchmark Dataset for Diagnoses and Deterioration Prediction in Emergency Medicine}, 
-      author={Juan Miguel Lopez Alcaraz and Hjalmar Bouma and Nils Strodthoff},
-      year={2024},
-      eprint={2407.17856},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2407.17856}, 
+@article{ALCARAZ2025110196,
+title = {Enhancing clinical decision support with physiological waveforms â€” A multimodal benchmark in emergency care},
+journal = {Computers in Biology and Medicine},
+volume = {192},
+pages = {110196},
+year = {2025},
+issn = {0010-4825},
+doi = {https://doi.org/10.1016/j.compbiomed.2025.110196},
+url = {https://www.sciencedirect.com/science/article/pii/S0010482525005475},
+author = {Juan Miguel Lopez Alcaraz and Hjalmar Bouma and Nils Strodthoff},
+keywords = {Deep-learning, Emergency department, Machine learning, Medical decision support, Multimodal data, Patient diagnostics, Patient deterioration},
+abstract = {Background:
+AI-driven prediction algorithms have the potential to enhance emergency medicine by enabling rapid and accurate decision-making regarding patient status and potential deterioration. However, the integration of multimodal data, including raw waveform signals, remains underexplored in clinical decision support.
+Methods:
+We present a dataset and benchmarking protocol designed to advance multimodal decision support in emergency care. Our models utilize demographics, biometrics, vital signs, laboratory values, and electrocardiogram (ECG) waveforms as inputs to predict both discharge diagnoses and patient deterioration.
+Results:
+The diagnostic model achieves area under the receiver operating curve (AUROC) scores above 0.8 for 609 out of 1,428 conditions, covering both cardiac (e.g., myocardial infarction) and non-cardiac (e.g., renal disease, diabetes) diagnoses. The deterioration model attains AUROC scores above 0.8 for 14 out of 15 targets, accurately predicting critical events such as cardiac arrest, mechanical ventilation, ICU admission, and mortality.
+Conclusions:
+Our study highlights the positive impact of incorporating raw waveform data into decision support models, improving predictive performance. By introducing a unique, publicly available dataset and baseline models, we provide a foundation for measurable progress in AI-driven decision support for emergency care.}
 }
 ```
