@@ -184,8 +184,6 @@ Because XGB gain and MLP SHAP are on different scales, importances are normalize
 | Deep Ensemble | 0.11 | 0.8110 | 0.8613 | 592 | 738 | 4583 | 138 |
 | XGBoost | 0.11 | 0.8000 | 0.8703 | 584 | 690 | 4631 | 146 |
 
-> XGBoost's base model was re-trained with mask features included (previously mask-excluded, per the tabular-vs-multimodal distinction in the professor's original notebook — see Section 1). This changes the baseline entirely, so the row above must be filled in from the new `prob_thr_sweep_summary_xgboost_withmask_trainQ.csv` once that script has been run.
-
 ### 5.2 Performance with Q-model Filtering (Best Operating Point per Base Model)
 
 | Base Model | Threshold | Strategy | Q-model | Sensitivity | Specificity | FP Reduction | FN Reduction | TP | FP | TN | FN | Total Reduction |
