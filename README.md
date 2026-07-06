@@ -182,7 +182,7 @@ Because XGB gain and MLP SHAP are on different scales, importances are normalize
 | BasicMLP | 0.10 | 0.8110 | 0.8528 | 592 | 783 | 4538 | 138 |
 | MC Dropout | 0.13 | 0.8014 | 0.8508 | 585 | 794 | 4527 | 145 |
 | Deep Ensemble | 0.11 | 0.8110 | 0.8613 | 592 | 738 | 4583 | 138 |
-| XGBoost | *(TBD — pending re-run of `qmodel_xgboost.py` with mask included)* | | | | | | |
+| XGBoost | 0.11 | 0.8000 | 0.8703 | 584 | 690 | 4631 | 146 |
 
 > XGBoost's base model was re-trained with mask features included (previously mask-excluded, per the tabular-vs-multimodal distinction in the professor's original notebook — see Section 1). This changes the baseline entirely, so the row above must be filled in from the new `prob_thr_sweep_summary_xgboost_withmask_trainQ.csv` once that script has been run.
 
