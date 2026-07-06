@@ -1,12 +1,23 @@
 """
-XGBoost Base Model + prob_threshold sweep for Q-model pipeline
-================================================================
-변경 사항 (교수님 지침 반영):
-  1. ✅ Mask 제거: 교수님 demo.ipynb 지침 — "tabular 모델(XGBoost)은
-     mask 없이 all_features만 사용". 기존 all_features_with_mask(933개)
-     대신 all_features(466개)만 사용.
-  2. ✅ Q-model 학습: val -> train
-  3. Feature Importance / SHAP / Plot 섹션 제거
+XGBoost Base Model + prob_threshold sweep for Q-model pipeline (WITH MASK)
+============================================================================
+변경 사항:
+  ✅ Mask 포함으로 전환: 기존에는 교수님 demo.ipynb 지침
+     ("tabular 모델은 mask 없이")을 따라 mask를 제외했으나,
+     - 이 지침은 원래 멀티모달(waveform+tabular) 세팅에서의 구분이고
+       지금 우리는 tabular-only 4개 모델(BasicMLP/MC Dropout/
+       Deep Ensemble/XGBoost)을 "동일 feature 공간"에서 비교하는 게 목적
+     - mask 컬럼 자체가 기존 실험에서 importance가 거의 0이라
+       (gain=0인 경우 대부분) 추가해도 성능 손해가 크지 않을 것으로 판단
+     이에 따라 XGBoost도 다른 3개 모델과 동일하게
+     all_features_with_mask(933개)를 사용하도록 base model부터 재학습.
+
+  ✅ Q-model 학습: val -> train (기존과 동일하게 유지)
+  ✅ Feature Importance / SHAP / Plot 섹션 없음 (기존과 동일 — sweep 전용)
+
+주의: base model 자체가 바뀌므로(mask 포함 입력), 이전 sweep 결과
+     (AUROC, 최적 threshold=0.09 등)와 다를 수 있습니다. 이 스크립트
+     실행 후 나온 새 요약 CSV로 최적 threshold를 다시 확인해야 합니다.
 """
 
 import sys
@@ -52,7 +63,7 @@ print(f"Device: {DEVICE}")
 
 # ============================================================
 # 1. Load & preprocess data
-#    ✅ mask 제거 — tabular 모델은 원본 feature만 사용 (교수님 지침)
+#    ✅ mask 포함 — 다른 3개 모델과 동일 feature 공간으로 통일
 # ============================================================
 print("\nLoading data...")
 df = pd.read_csv(DATA_PATH, low_memory=False)
@@ -67,9 +78,17 @@ all_features         = demographics_columns + biometrics_columns + vitals_column
 selected_folds = df[df['general_strat_fold'].isin(range(0, 18))]
 medians        = selected_folds[all_features].median()
 
-# ✅ mask 컬럼 생성 코드 제거 (더 이상 all_features_with_mask 사용 안 함)
+# ✅ mask 컬럼 추가 (notna 기준 — 다른 3개 모델과 동일한 정의)
+mask_columns = []
+for col in all_features:
+    mask_col = col + '_m'
+    df[mask_col] = df[col].notna().astype(float)
+    mask_columns.append(mask_col)
+
 df[all_features] = df[all_features].fillna(medians)
-print(f"Features (mask 제외): {len(all_features)}")
+all_features_with_mask = all_features + mask_columns
+print(f"Features (mask 포함): {len(all_features_with_mask)} "
+      f"(base {len(all_features)} + mask {len(mask_columns)})")
 
 target_columns = [
     'deterioration_mortality_1d',
@@ -88,10 +107,10 @@ test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 val_df  = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 
-# ✅ mask 없이 all_features만 사용
-x_train = train_df[all_features].values
-x_val   = val_df[all_features].values
-x_test  = test_df[all_features].values
+# ✅ mask 포함 feature 사용
+x_train = train_df[all_features_with_mask].values
+x_val   = val_df[all_features_with_mask].values
+x_test  = test_df[all_features_with_mask].values
 
 y_train = train_df[target_columns].values
 y_val   = val_df[target_columns].values
@@ -100,9 +119,9 @@ y_test  = test_df[target_columns].values
 print(f"Train: {x_train.shape}, Val: {x_val.shape}, Test: {x_test.shape}")
 
 # ============================================================
-# 3. Train XGBoost base model (ICU 24h target only)
+# 3. Train XGBoost base model (ICU 24h target only) — ✅ mask 포함 재학습
 # ============================================================
-print("\nTraining XGBoost base model (ICU 24h)...")
+print("\nTraining XGBoost base model (ICU 24h, mask 포함)...")
 
 i = ICU24H_IDX
 y_tr_raw = y_train[:, i]; y_v_raw = y_val[:, i]; y_te_raw = y_test[:, i]
@@ -122,7 +141,7 @@ x_te = x_test[mask_te]
 base_model = XGBClassifier(**XGB_BASE_PARAMS)
 base_model.fit(x_tr, y_tr, eval_set=[(x_v, y_v)], verbose=False)
 
-train_prob_icu = base_model.predict_proba(x_tr)[:, 1]   # ✅ Q-model 학습용
+train_prob_icu = base_model.predict_proba(x_tr)[:, 1]   # Q-model 학습용
 val_prob_icu   = base_model.predict_proba(x_v)[:, 1]
 test_prob_icu  = base_model.predict_proba(x_te)[:, 1]
 train_true_icu = y_tr
@@ -137,8 +156,8 @@ print(f"  Train samples: {len(train_prob_icu)}")
 print(f"  Test  samples: {len(test_prob_icu)}")
 
 # ============================================================
-# ✅ Prepare Q-Model features: Base features (mask 없음) + Base probability
-#    ✅ train 기준으로 준비
+# ✅ Prepare Q-Model features: Base features (mask 포함) + Base probability
+#    train 기준으로 준비
 # ============================================================
 print("\n" + "="*70)
 print("Preparing Q-Model features (TRAIN set, base features + base probability)...")
@@ -148,12 +167,12 @@ X_train_features = x_tr
 X_test_features  = x_te
 
 print(f"\n📊 Q-Model Input Features:")
-print(f"  Base tabular features: {X_train_features.shape[1]} (mask 제외)")
+print(f"  Base tabular features (mask 포함): {X_train_features.shape[1]}")
 print(f"  + Base probability: 1")
 print(f"  = Total Q-Model features: {X_train_features.shape[1] + 1}")
 
 # ============================================================
-# 4. Q-model helpers
+# 4. Q-model helpers (변경 없음)
 # ============================================================
 class QModelMLP(nn.Module):
     def __init__(self, input_dim, hidden_dims, dropout=0.3):
@@ -193,7 +212,7 @@ def fit_predict(model_type, X_tr, y_tr, X_eval):
         return train_mlp(X_tr, y_tr.astype(np.float32), X_eval)
     else:
         m = XGBClassifier(n_estimators=200, max_depth=4, learning_rate=0.05,
-                           use_label_encoder=False, eval_metric='logloss',
+                           eval_metric='logloss',
                            random_state=RANDOM_STATE, verbosity=0)
         m.fit(X_tr, y_tr)
         return m.predict_proba(X_eval)[:, 1]
@@ -239,7 +258,7 @@ def best_op(q_probs, pred_base, true_label, fp_base):
 
 # ============================================================
 # 5. Main sweep loop
-#    ✅ Q-model 학습: train_prob_icu / train_true_icu / X_train_features
+#    Q-model 학습: train_prob_icu / train_true_icu / X_train_features
 # ============================================================
 summary_rows = []
 
@@ -250,9 +269,9 @@ print(f"{'='*60}")
 for prob_thr in PROB_THRESHOLDS:
     print(f"\n>>> prob_threshold = {prob_thr:.2f}")
 
-    train_pred = (train_prob_icu >= prob_thr).astype(int)   # ✅ train 기준
+    train_pred = (train_prob_icu >= prob_thr).astype(int)
     test_pred  = (test_prob_icu  >= prob_thr).astype(int)
-    train_err  = (train_pred != train_true_icu).astype(int)  # ✅ Q-model 타깃
+    train_err  = (train_pred != train_true_icu).astype(int)
     test_err   = (test_pred  != test_true_icu).astype(int)
 
     tp_b = int(((test_pred==1)&(test_true_icu==1)).sum())
@@ -295,13 +314,13 @@ for prob_thr in PROB_THRESHOLDS:
 # 6. Save summary CSV
 # ============================================================
 summary_df   = pd.DataFrame(summary_rows)
-summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_xgboost_nomask_trainQ.csv")
+summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_xgboost_withmask_trainQ.csv")
 summary_df.to_csv(summary_path, index=False)
 print(f"\nSummary saved: {summary_path}")
 print(summary_df.to_string(index=False))
 
 print("\n" + "="*70)
-print("✅ All done! (mask 제거, Q-model train set 기준, feature importance 없음)")
+print("✅ All done! (mask 포함, Q-model train set 기준, feature importance 없음)")
 print("="*70)
 print(f"  Base model AUROC (test): {auroc_test:.4f}")
 print(f"  Summary CSV: {summary_path}")
