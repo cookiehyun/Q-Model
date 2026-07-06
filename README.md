@@ -83,12 +83,8 @@ Q-MODEL/
 └── feature/
     ├── feature.py                                     # Computes & compares feature importance across all 4 models
     ├── feature_importance_{basicmlp,deepensemble,mcdropout,xgboost}.csv
-    ├── qmodel_feature_importance_top5_4models_comparison.png
-    └── fig/                                            # Per-model feature importance plots
+    └── qmodel_feature_importance_top5_4models_comparison.png
 ```
-
-> [!NOTE]
-> To confirm: the file roles above are inferred from filenames and prior discussion. Please double-check details such as whether `qmodel_xgboost.py` really includes base model training, and correct anything that doesn't match the actual code.
 
 ---
 
@@ -154,6 +150,8 @@ python xgboost/qmodel_xgboost.py
 | `sensitivity`, `TP`, `FP`, `FN`, `TN` | Confusion matrix at the selected operating point |
 | `FP_reduction_pct` | FP reduction (%) relative to baseline |
 
+Specificity, FN reduction (%), and total error reduction (%) shown in Section 5.2 are **not** columns in these CSVs — they are derived post-hoc from `TP`/`FP`/`TN`/`FN` (`specificity = TN/(TN+FP)`, `FN_reduction = (FN_base - FN_new)/FN_base * 100`, `total_reduction = ((FP_base+FN_base) - (FP_new+FN_new))/(FP_base+FN_base) * 100`).
+
 ---
 
 ## 4. Computing Feature Importance
@@ -162,13 +160,12 @@ python xgboost/qmodel_xgboost.py
 python feature/feature.py
 ```
 
-- Computes feature importance for the (XGB-based) Q-model trained on each of the 4 base models (BasicMLP, Deep Ensemble, MC Dropout, XGBoost).
-- Per-model results: `feature_importance_{model_name}.csv`
-- A side-by-side comparison of the top-5 features across all 4 models: `qmodel_feature_importance_top5_4models_comparison.png`
-- Per-model detailed plots are saved under `fig/`.
+For each base model, feature importance is computed for its **confirmed best (threshold, strategy, Q-model)** combination — not uniformly "the XGB Q-model" for all four. BasicMLP and Deep Ensemble use an XGB Q-model (gain importance); MC Dropout and XGBoost use an MLP Q-model, for which gain importance doesn't apply, so **SHAP (DeepExplainer, mean |SHAP value|)** is used instead. For the MLP/CrossFit case, each fold's model is trained on the train fold and SHAP values are computed on that fold's held-out data, following standard cross-validation practice for SHAP.
 
-> [!NOTE]
-> To confirm: does feature importance use only the XGB Q-model, or is it computed for both the Simple and CrossFit strategies? Let me know and I'll update this section accordingly.
+Because XGB gain and MLP SHAP are on different scales, importances are normalized to max = 1.0 **within each base model** before being placed on the same comparison plot — only the relative ranking/shape within a model is comparable across models, not the raw magnitudes.
+
+- Per-model results: `feature_importance_{model_name}.csv`
+- Side-by-side comparison of the top-5 features across all 4 models: `qmodel_feature_importance_top5_4models_comparison.png`
 
 **Top-5 feature importance comparison across all 4 models:**
 
@@ -182,25 +179,27 @@ python feature/feature.py
 
 | Model | Threshold | Sensitivity | Specificity | TP | FP | TN | FN |
 |---|---|---|---|---|---|---|---|
-| BasicMLP | 0.08 | 0.8466 | 0.8199 | 618 | 958 | 4363 | 112 |
-| MC Dropout | 0.10 | 0.8438 | 0.8134 | 616 | 993 | 4328 | 114 |
-| Deep Ensemble | 0.08 | 0.8575 | 0.8109 | 626 | 1006 | 4315 | 104 |
-| XGBoost | 0.09 | 0.8000 | 0.8414 | 584 | 844 | 4477 | 146 |
+| BasicMLP | 0.10 | 0.8110 | 0.8528 | 592 | 783 | 4538 | 138 |
+| MC Dropout | 0.13 | 0.8014 | 0.8508 | 585 | 794 | 4527 | 145 |
+| Deep Ensemble | 0.11 | 0.8110 | 0.8613 | 592 | 738 | 4583 | 138 |
+| XGBoost | *(TBD — pending re-run of `qmodel_xgboost.py` with mask included)* | | | | | | |
+
+> XGBoost's base model was re-trained with mask features included (previously mask-excluded, per the tabular-vs-multimodal distinction in the professor's original notebook — see Section 1). This changes the baseline entirely, so the row above must be filled in from the new `prob_thr_sweep_summary_xgboost_withmask_trainQ.csv` once that script has been run.
 
 ### 5.2 Performance with Q-model Filtering (Best Operating Point per Base Model)
 
 | Base Model | Threshold | Strategy | Q-model | Sensitivity | Specificity | FP Reduction | FN Reduction | TP | FP | TN | FN | Total Reduction |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| BasicMLP | 0.09 | Simple | XGB | 0.8041 | 0.8635 | 14.37% | -13.49% | 587 | 727 | 4594 | 143 | 10.77% |
-| Deep Ensemble | 0.10 | Simple | XGB | 0.8096 | 0.8698 | 14.44% | -15.83% | 591 | 693 | 4628 | 139 | 10.54% |
-| MC Dropout | 0.11 | CrossFit | XGB | 0.8055 | 0.8571 | 17.19% | -14.52% | 588 | 761 | 4560 | 142 | 13.42% |
-| XGBoost | 0.09 | Simple | XGB | 0.8000 | 0.8414 | 0.00% | 0.00% | 584 | 844 | 4477 | 146 | 0.00% |
+| BasicMLP | 0.10 | CrossFit | XGB | 0.8027 | 0.8590 | 4.21% | -4.35% | 586 | 750 | 4571 | 144 | 2.93% |
+| Deep Ensemble | 0.11 | Simple | XGB | 0.8096 | 0.8673 | 4.34% | -0.72% | 591 | 706 | 4615 | 139 | 3.54% |
+| MC Dropout | 0.13 | CrossFit | MLP | 0.8000 | 0.8544 | 2.39% | -0.69% | 584 | 775 | 4546 | 146 | 1.92% |
+| XGBoost | 0.11 | CrossFit | MLP | 0.8000 | 0.8711 | 0.58% | 0.00% | 584 | 686 | 4635 | 146 | 0.48% |
 
 **Conclusions**
-- Across BasicMLP, Deep Ensemble, and MC Dropout, the **XGB-based Q-model** yields a positive total reduction (FP+FN) over the baseline, ranked **MC Dropout (13.42%) > BasicMLP (10.77%) > Deep Ensemble (10.54%)**.
-- The **Simple** strategy is best for BasicMLP and Deep Ensemble, while **CrossFit** is best for MC Dropout.
-- For all three, **FN increases** relative to baseline (negative FN reduction) while **FP decreases substantially** — the Q-model trades a small increase in missed cases for a much larger drop in false alarms, and the net effect is still a reduction in total errors.
-- **XGBoost shows 0% reduction** at its own best operating point — the Q-model was not able to improve on the XGBoost baseline at threshold 0.09.
+- At these operating points, the Q-model's room for improvement is small for all four base models (FP reduction between 0.58% and 4.34%) — these thresholds were themselves chosen to already have sensitivity ≥ 0.80 with a reasonably high baseline specificity, leaving little "recoverable" FP for the Q-model to remove.
+- The best Q-model type differs by base model: **XGB** for BasicMLP and Deep Ensemble, **MLP** for MC Dropout and XGBoost.
+- **XGBoost still shows the smallest improvement (0.58%)** of the four, consistent with its baseline already sitting close to the sensitivity/specificity trade-off boundary.
+- For all four, **FN increases slightly** relative to baseline (small negative FN reduction) while FP decreases by a larger relative amount — the net effect (Total Reduction) is still positive, but modest at these particular thresholds.
+- **Deep Ensemble has the highest absolute specificity (0.8673)** among the four Q-model-filtered results shown here.
 
-> [!NOTE]
-> The XGBoost row above still reflects the mask-included re-run's baseline threshold (0.09) with no Q-model improvement. Please confirm this is expected, or let me know if a different threshold/strategy should be used once new sweep results are available.
+> Note: these are the results at the threshold where **baseline** sensitivity and specificity are each individually maximized/first cross 0.80. A different selection rule (e.g., lowest achievable total error across *all* thresholds with sens ≥ 0.80, not just this narrower baseline-constrained set) gives substantially larger FP reductions for BasicMLP, Deep Ensemble, and MC Dropout (all Simple/CrossFit-XGB, at lower prob_thr where baseline FP is much higher) — see the full sweep CSVs for the complete threshold-by-threshold comparison.

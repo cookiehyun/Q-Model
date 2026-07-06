@@ -1,11 +1,6 @@
 """
 XGBoost base model + Q-model threshold sweep (mask included).
 
-XGBoost now uses the same feature space as the other 3 base models
-(raw features + mask columns), so all 4 base models are compared on
-equal footing. Everything else follows the same sweep procedure as
-the BasicMLP version: base model trained on train/val, Q-model trained
-on train, evaluated on test.
 """
 
 import numpy as np

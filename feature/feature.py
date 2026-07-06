@@ -1,9 +1,18 @@
 """
-Q-model feature importance comparison across all 4 base models (top-5, single plot).
+Q-model feature importance comparison across the four base models (top-5, single plot).
+
+Confirmed (threshold, strategy, Q-model) per base model:
+    BasicMLP      : thr=0.10, CrossFit, XGB
+    Ensemble      : thr=0.11, Simple,   XGB
+    MC Dropout    : thr=0.13, CrossFit, MLP  (no gain importance for MLP -> SHAP)
+    XGBoost       : thr=0.11, CrossFit, MLP  (same as above)
+
+XGB models use gain importance; MLP models use SHAP (DeepExplainer). Each model's
+importances are normalized to max=1.0 before combining into a single comparison plot.
 
 Outputs:
     - feature_importance_{model}.csv per base model (all features)
-    - a single comparison plot of the top-5 features across all 4 models (png)
+    - combined top-5 comparison plot (png)
 """
 
 import sys
@@ -16,7 +25,7 @@ import pandas as pd
 import dataclasses
 from dataclasses import dataclass, field
 from typing import List
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from sklearn.model_selection import StratifiedKFold
 from xgboost import XGBClassifier
 from collections.abc import Iterable
@@ -44,9 +53,16 @@ torch.manual_seed(RANDOM_STATE)
 XGB_PARAMS = dict(n_estimators=200, max_depth=4, learning_rate=0.05,
                   eval_metric='logloss', random_state=RANDOM_STATE, verbosity=0)
 
+# Q-model MLP hyperparameters (same as the sweep scripts)
+MLP_HIDDEN   = [64, 32]
+MLP_EPOCHS   = 50
+MLP_LR       = 1e-3
+MLP_BATCH    = 64
+MLP_DROPOUT  = 0.3
+
 
 # ------------------------------------------------------------
-# Shared torch encoder (used by BasicMLP / MC Dropout / Deep Ensemble)
+# Shared torch encoder (BasicMLP / MC Dropout / Deep Ensemble)
 # ------------------------------------------------------------
 class BasicEncoderStatic(EncoderStaticBase):
     def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
@@ -136,7 +152,104 @@ class TabularDataset(Dataset):
 
 
 # ------------------------------------------------------------
-# Shared preprocessing (mask-included), used by all 4 base models
+# Q-model MLP
+# ------------------------------------------------------------
+class QModelMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dims, dropout=0.3):
+        super().__init__()
+        layers, prev = [], input_dim
+        for h in hidden_dims:
+            layers += [nn.Linear(prev, h), nn.BatchNorm1d(h), nn.ReLU(), nn.Dropout(dropout)]
+            prev = h
+        layers.append(nn.Linear(prev, 1))
+        self.net = nn.Sequential(*layers)
+    def forward(self, x):
+        # keep (batch, 1) — shap.DeepExplainer indexes outputs.shape[1]
+        return self.net(x)
+
+
+def train_qmodel_mlp(X_tr, y_tr):
+    model   = QModelMLP(X_tr.shape[1], MLP_HIDDEN, MLP_DROPOUT).to(DEVICE)
+    opt     = torch.optim.Adam(model.parameters(), lr=MLP_LR)
+    loss_fn = nn.MSELoss()
+    dl = DataLoader(TensorDataset(torch.tensor(X_tr, dtype=torch.float32),
+                                  torch.tensor(y_tr.astype(np.float32), dtype=torch.float32)),
+                    batch_size=MLP_BATCH, shuffle=True)
+    for _ in range(MLP_EPOCHS):
+        model.train()
+        for xb, yb in dl:
+            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+            opt.zero_grad()
+            loss_fn(torch.sigmoid(model(xb)).squeeze(-1), yb).backward()
+            opt.step()
+    model.eval()
+    return model
+
+
+def mlp_importance_shap(model, X_all, n_background=100, n_sample=200):
+    """Mean |SHAP value| per feature for a trained Q-model MLP."""
+    import shap
+    bg_idx = np.random.choice(len(X_all), size=min(n_background, len(X_all)//2), replace=False)
+    background = torch.tensor(X_all[bg_idx], dtype=torch.float32).to(DEVICE)
+    explainer = shap.DeepExplainer(model, background)
+
+    sample_idx = np.random.choice(len(X_all), size=min(n_sample, len(X_all)//2), replace=False)
+    sample = torch.tensor(X_all[sample_idx], dtype=torch.float32).to(DEVICE)
+
+    shap_values = explainer.shap_values(sample)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+    shap_values = np.asarray(shap_values)
+    # squeeze trailing singleton dim from the (batch, 1) model output
+    if shap_values.ndim == 3 and shap_values.shape[-1] == 1:
+        shap_values = shap_values.squeeze(-1)
+    return np.mean(np.abs(shap_values), axis=0)
+
+
+def mlp_importance_simple(X_tr, y_tr, feature_names):
+    """Simple strategy: one MLP trained on the full train set, SHAP importance."""
+    model = train_qmodel_mlp(X_tr, y_tr)
+    return mlp_importance_shap(model, X_tr)
+
+
+def mlp_importance_crossfit(X_tr, y_tr, feature_names, n_folds=N_FOLDS):
+    """CrossFit strategy: average SHAP importance across 5 fold-trained MLPs.
+
+    Each model is trained on the train fold, SHAP is computed on the held-out
+    fold, following standard practice for SHAP under cross-validation.
+    """
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=RANDOM_STATE)
+    all_importances = []
+    for tri, vli in skf.split(X_tr, y_tr):
+        model = train_qmodel_mlp(X_tr[tri], y_tr[tri])
+        imp = mlp_importance_shap(model, X_tr[vli])
+        all_importances.append(imp)
+    return np.mean(all_importances, axis=0)
+
+
+def xgb_importance_simple(X_tr, y_tr, feature_names):
+    """Simple strategy: gain importance of one XGB trained on the full train set."""
+    model = XGBClassifier(**XGB_PARAMS)
+    model.fit(X_tr, y_tr)
+    imp_dict = model.get_booster().get_score(importance_type='gain')
+    return np.array([imp_dict.get(f"f{i}", 0.0) for i in range(len(feature_names))])
+
+
+def xgb_importance_crossfit(X_tr, y_tr, feature_names, n_folds=N_FOLDS):
+    """CrossFit strategy: average gain importance across 5 fold-trained XGBs."""
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=RANDOM_STATE)
+    all_importances = []
+    for tri, _ in skf.split(X_tr, y_tr):
+        model = XGBClassifier(**XGB_PARAMS)
+        model.fit(X_tr[tri], y_tr[tri])
+        imp_dict = model.get_booster().get_score(importance_type='gain')
+        importances = np.array([imp_dict.get(f"f{i}", 0.0) for i in range(len(feature_names))])
+        all_importances.append(importances)
+    return np.mean(all_importances, axis=0)
+
+
+# ------------------------------------------------------------
+# Shared preprocessing (mask columns included for all 4 base models)
 # ------------------------------------------------------------
 def load_data_with_mask():
     df = pd.read_csv(DATA_PATH, low_memory=False)
@@ -187,37 +300,26 @@ def load_data_with_mask():
     return df, train_df, test_df, cont_features, cat_features, unique_counts, lbl_itos
 
 
-def xgb_importance_simple(X_tr, y_tr, feature_names):
-    """Simple strategy: gain importance of one XGB trained on the full train set."""
-    model = XGBClassifier(**XGB_PARAMS)
-    model.fit(X_tr, y_tr)
-    imp_dict = model.get_booster().get_score(importance_type='gain')
-    return np.array([imp_dict.get(f"f{i}", 0.0) for i in range(len(feature_names))])
-
-
-def xgb_importance_crossfit(X_tr, y_tr, feature_names, n_folds=N_FOLDS):
-    """CrossFit strategy: average gain importance across 5 fold-trained XGBs."""
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=RANDOM_STATE)
-    all_importances = []
-    for tri, _ in skf.split(X_tr, y_tr):
-        model = XGBClassifier(**XGB_PARAMS)
-        model.fit(X_tr[tri], y_tr[tri])
-        imp_dict = model.get_booster().get_score(importance_type='gain')
-        importances = np.array([imp_dict.get(f"f{i}", 0.0) for i in range(len(feature_names))])
-        all_importances.append(importances)
-    return np.mean(all_importances, axis=0)
+def get_probs_labels(loader, encoder):
+    all_probs, all_labels = [], []
+    with torch.no_grad():
+        for cont, cat, labels in loader:
+            cont, cat = cont.to(DEVICE), cat.to(DEVICE)
+            probs = torch.sigmoid(encoder(static=cont, static_cat=cat)["static"])
+            all_probs.append(probs.cpu().numpy()); all_labels.append(labels.numpy())
+    return np.concatenate(all_probs,0), np.concatenate(all_labels,0)
 
 
 all_top5 = {}  # model_label -> DataFrame(feature, importance_norm)
 
-# ------------------------------------------------------------
-# [1] BasicMLP | threshold=0.09 | Simple | XGB
-# ------------------------------------------------------------
-print("BasicMLP | threshold=0.09 | Simple | XGB")
+# ==============================================================
+# [1] BasicMLP | threshold=0.10 | CrossFit | XGB
+# ==============================================================
+print("BasicMLP | threshold=0.10 | CrossFit | XGB")
 
-BASICMLP_BASE_DIR = "/fs/dss/home/gaad2403/MDS-ED/key/Final/basicMLP"
+BASICMLP_BASE_DIR = "/user/gaad2403/MDS-ED/key/Final/basicMLP"
 BASICMLP_PT_PATH  = os.path.join(BASICMLP_BASE_DIR, "best_basicmlp_icu24h_only.pt")
-BASICMLP_THR      = 0.09
+BASICMLP_THR      = 0.10
 
 df_b, train_df_b, test_df_b, cont_b, cat_b, uniq_b, lbl_b = load_data_with_mask()
 
@@ -229,15 +331,6 @@ enc_b.load_state_dict(torch.load(BASICMLP_PT_PATH, map_location=DEVICE))
 enc_b.eval()
 
 train_loader_b = DataLoader(TabularDataset(train_df_b, cont_b, cat_b, lbl_b), batch_size=512, shuffle=False)
-
-def get_probs_labels(loader, encoder):
-    all_probs, all_labels = [], []
-    with torch.no_grad():
-        for cont, cat, labels in loader:
-            cont, cat = cont.to(DEVICE), cat.to(DEVICE)
-            probs = torch.sigmoid(encoder(static=cont, static_cat=cat)["static"])
-            all_probs.append(probs.cpu().numpy()); all_labels.append(labels.numpy())
-    return np.concatenate(all_probs,0), np.concatenate(all_labels,0)
 
 train_probs_b, train_labels_b = get_probs_labels(train_loader_b, enc_b)
 train_prob_b  = train_probs_b[:, 0]
@@ -257,99 +350,25 @@ X_train_q_b = np.hstack([X_train_feat_b, train_prob_b.reshape(-1,1)]).astype(np.
 train_pred_b = (train_prob_b >= BASICMLP_THR).astype(int)
 train_err_b  = (train_pred_b != train_true_b).astype(int)
 
-imp_b = xgb_importance_simple(X_train_q_b, train_err_b, feature_names_b)
-imp_df_b = pd.DataFrame({'feature': feature_names_b, 'importance_gain': imp_b}).sort_values('importance_gain', ascending=False)
+imp_b = xgb_importance_crossfit(X_train_q_b, train_err_b, feature_names_b)
+imp_df_b = pd.DataFrame({'feature': feature_names_b, 'importance': imp_b}).sort_values('importance', ascending=False)
 imp_df_b.to_csv(os.path.join(COMPARISON_DIR, "feature_importance_basicmlp.csv"), index=False)
 print(imp_df_b.head(5).to_string(index=False))
 
-top5_b = imp_df_b.nlargest(5, 'importance_gain').copy()
-top5_b['importance_norm'] = top5_b['importance_gain'] / top5_b['importance_gain'].max()
+top5_b = imp_df_b.nlargest(5, 'importance').copy()
+top5_b['importance_norm'] = top5_b['importance'] / top5_b['importance'].max()
 all_top5['BasicMLP'] = top5_b[['feature', 'importance_norm']]
 
 del enc_b, df_b, train_df_b, test_df_b
 torch.cuda.empty_cache()
 
-# ------------------------------------------------------------
-# [2] MC Dropout | threshold=0.11 | CrossFit | XGB
-# ------------------------------------------------------------
-print("MC Dropout | threshold=0.11 | CrossFit | XGB")
-
-MCDROPOUT_BASE_DIR = "/user/gaad2403/MDS-ED/key/Final/MCdropout"
-MCDROPOUT_PT_PATH  = os.path.join(MCDROPOUT_BASE_DIR, "best_mcdropout_icu24h_only_mask.pt")
-MCDROPOUT_THR      = 0.11
-MC_SAMPLES         = 50
-EPSILON            = 1e-10
-
-df_m, train_df_m, test_df_m, cont_m, cat_m, uniq_m, lbl_m = load_data_with_mask()
-
-shape_m  = ShapeCfg(static_dim=len(cont_m), static_dim_cat=len(cat_m))
-mlpcfg_m = MLPConfig(embedding_dims=[uniq_m[c] for c in cat_m],
-                     vocab_sizes=[uniq_m[c] for c in cat_m], lin_ftrs=[128,128,128])
-enc_m = BasicEncoderStaticMLP(mlpcfg_m, shape_m, target_dim=1).to(DEVICE)
-enc_m.load_state_dict(torch.load(MCDROPOUT_PT_PATH, map_location=DEVICE))
-
-train_loader_m = DataLoader(TabularDataset(train_df_m, cont_m, cat_m, lbl_m), batch_size=512, shuffle=False)
-
-def mc_dropout_predict(loader, model, T=50):
-    model.train()  # keep dropout active
-    all_samples, all_labels = [], []
-    with torch.no_grad():
-        for cont, cat, labels in loader:
-            cont, cat = cont.to(DEVICE), cat.to(DEVICE)
-            batch_samples = []
-            for _ in range(T):
-                probs = torch.sigmoid(model(static=cont, static_cat=cat)["static"]).cpu().numpy()
-                batch_samples.append(probs.squeeze(-1))
-            all_samples.append(np.stack(batch_samples, axis=0))
-            all_labels.append(labels.numpy().squeeze(-1))
-    all_samples = np.concatenate(all_samples, axis=1)
-    all_labels  = np.concatenate(all_labels,  axis=0)
-    mean_probs = all_samples.mean(axis=0)
-    variance   = all_samples.var(axis=0)
-    p = mean_probs
-    entropy = -(p*np.log(p+EPSILON) + (1-p)*np.log(1-p+EPSILON))
-    return mean_probs, variance, entropy, all_labels
-
-train_mean_m, train_var_m, train_ent_m, train_labels_m = mc_dropout_predict(train_loader_m, enc_m, MC_SAMPLES)
-
-train_mask_m  = ~np.isnan(train_labels_m)
-train_prob_m  = train_mean_m[train_mask_m]
-train_var_m2  = train_var_m[train_mask_m]
-train_ent_m2  = train_ent_m[train_mask_m]
-train_true_m  = train_labels_m[train_mask_m].astype(int)
-train_df_masked_m = train_df_m[train_mask_m].reset_index(drop=True)
-
-X_train_feat_m = np.hstack([
-    train_df_masked_m[cont_m].values.astype(np.float32),
-    train_df_masked_m[cat_m].values.astype(np.float32)
-])
-feature_names_m = cont_m + cat_m + ["prob_icu24h", "variance", "entropy"]
-X_train_q_m = np.hstack([
-    X_train_feat_m, train_prob_m.reshape(-1,1), train_var_m2.reshape(-1,1), train_ent_m2.reshape(-1,1)
-]).astype(np.float32)
-
-train_pred_m = (train_prob_m >= MCDROPOUT_THR).astype(int)
-train_err_m  = (train_pred_m != train_true_m).astype(int)
-
-imp_m = xgb_importance_crossfit(X_train_q_m, train_err_m, feature_names_m)
-imp_df_m = pd.DataFrame({'feature': feature_names_m, 'importance_gain': imp_m}).sort_values('importance_gain', ascending=False)
-imp_df_m.to_csv(os.path.join(COMPARISON_DIR, "feature_importance_mcdropout.csv"), index=False)
-print(imp_df_m.head(5).to_string(index=False))
-
-top5_m = imp_df_m.nlargest(5, 'importance_gain').copy()
-top5_m['importance_norm'] = top5_m['importance_gain'] / top5_m['importance_gain'].max()
-all_top5['MC Dropout'] = top5_m[['feature', 'importance_norm']]
-
-del enc_m, df_m, train_df_m, test_df_m
-torch.cuda.empty_cache()
-
-# ------------------------------------------------------------
-# [3] Deep Ensemble | threshold=0.10 | Simple | XGB
-# ------------------------------------------------------------
-print("Deep Ensemble | threshold=0.10 | Simple | XGB")
+# ==============================================================
+# [2] Deep Ensemble | threshold=0.11 | Simple | XGB
+# ==============================================================
+print("Deep Ensemble | threshold=0.11 | Simple | XGB")
 
 DEEPENS_BASE_DIR = "/user/gaad2403/MDS-ED/key/Final/DeepEnsemble"
-DEEPENS_THR      = 0.10
+DEEPENS_THR      = 0.11
 M = 5
 
 df_d, train_df_d, test_df_d, cont_d, cat_d, uniq_d, lbl_d = load_data_with_mask()
@@ -415,27 +434,100 @@ train_pred_d = (train_prob_d >= DEEPENS_THR).astype(int)
 train_err_d  = (train_pred_d != train_true_d).astype(int)
 
 imp_d = xgb_importance_simple(X_train_q_d, train_err_d, feature_names_d)
-imp_df_d = pd.DataFrame({'feature': feature_names_d, 'importance_gain': imp_d}).sort_values('importance_gain', ascending=False)
+imp_df_d = pd.DataFrame({'feature': feature_names_d, 'importance': imp_d}).sort_values('importance', ascending=False)
 imp_df_d.to_csv(os.path.join(COMPARISON_DIR, "feature_importance_deepensemble.csv"), index=False)
 print(imp_df_d.head(5).to_string(index=False))
 
-top5_d = imp_df_d.nlargest(5, 'importance_gain').copy()
-top5_d['importance_norm'] = top5_d['importance_gain'] / top5_d['importance_gain'].max()
+top5_d = imp_df_d.nlargest(5, 'importance').copy()
+top5_d['importance_norm'] = top5_d['importance'] / top5_d['importance'].max()
 all_top5['Deep Ensemble'] = top5_d[['feature', 'importance_norm']]
 
 del ensemble_models_d, df_d, train_df_d, test_df_d
 torch.cuda.empty_cache()
 
-# ------------------------------------------------------------
-# [4] XGBoost | threshold=0.09 | Simple | XGB (mask included)
-# ------------------------------------------------------------
-print("XGBoost | threshold=0.09 | Simple | XGB (mask included)")
+# ==============================================================
+# [3] MC Dropout | threshold=0.13 | CrossFit | MLP
+# ==============================================================
+print("MC Dropout | threshold=0.13 | CrossFit | MLP")
 
-XGB_THR = 0.09
+MCDROPOUT_BASE_DIR = "/user/gaad2403/MDS-ED/key/Final/MCdropout"
+MCDROPOUT_PT_PATH  = os.path.join(MCDROPOUT_BASE_DIR, "best_mcdropout_icu24h_only_mask.pt")
+MCDROPOUT_THR      = 0.13
+MC_SAMPLES         = 50
+EPSILON            = 1e-10
+
+df_m, train_df_m, test_df_m, cont_m, cat_m, uniq_m, lbl_m = load_data_with_mask()
+
+shape_m  = ShapeCfg(static_dim=len(cont_m), static_dim_cat=len(cat_m))
+mlpcfg_m = MLPConfig(embedding_dims=[uniq_m[c] for c in cat_m],
+                     vocab_sizes=[uniq_m[c] for c in cat_m], lin_ftrs=[128,128,128])
+enc_m = BasicEncoderStaticMLP(mlpcfg_m, shape_m, target_dim=1).to(DEVICE)
+enc_m.load_state_dict(torch.load(MCDROPOUT_PT_PATH, map_location=DEVICE))
+
+train_loader_m = DataLoader(TabularDataset(train_df_m, cont_m, cat_m, lbl_m), batch_size=512, shuffle=False)
+
+def mc_dropout_predict(loader, model, T=50):
+    model.train()  # keep dropout active
+    all_samples, all_labels = [], []
+    with torch.no_grad():
+        for cont, cat, labels in loader:
+            cont, cat = cont.to(DEVICE), cat.to(DEVICE)
+            batch_samples = []
+            for _ in range(T):
+                probs = torch.sigmoid(model(static=cont, static_cat=cat)["static"]).cpu().numpy()
+                batch_samples.append(probs.squeeze(-1))
+            all_samples.append(np.stack(batch_samples, axis=0))
+            all_labels.append(labels.numpy().squeeze(-1))
+    all_samples = np.concatenate(all_samples, axis=1)
+    all_labels  = np.concatenate(all_labels,  axis=0)
+    mean_probs = all_samples.mean(axis=0)
+    variance   = all_samples.var(axis=0)
+    p = mean_probs
+    entropy = -(p*np.log(p+EPSILON) + (1-p)*np.log(1-p+EPSILON))
+    return mean_probs, variance, entropy, all_labels
+
+train_mean_m, train_var_m, train_ent_m, train_labels_m = mc_dropout_predict(train_loader_m, enc_m, MC_SAMPLES)
+
+train_mask_m  = ~np.isnan(train_labels_m)
+train_prob_m  = train_mean_m[train_mask_m]
+train_var_m2  = train_var_m[train_mask_m]
+train_ent_m2  = train_ent_m[train_mask_m]
+train_true_m  = train_labels_m[train_mask_m].astype(int)
+train_df_masked_m = train_df_m[train_mask_m].reset_index(drop=True)
+
+X_train_feat_m = np.hstack([
+    train_df_masked_m[cont_m].values.astype(np.float32),
+    train_df_masked_m[cat_m].values.astype(np.float32)
+])
+feature_names_m = cont_m + cat_m + ["prob_icu24h", "variance", "entropy"]
+X_train_q_m = np.hstack([
+    X_train_feat_m, train_prob_m.reshape(-1,1), train_var_m2.reshape(-1,1), train_ent_m2.reshape(-1,1)
+]).astype(np.float32)
+
+train_pred_m = (train_prob_m >= MCDROPOUT_THR).astype(int)
+train_err_m  = (train_pred_m != train_true_m).astype(int)
+
+print("  Computing SHAP importance for MLP (CrossFit, 5-fold)...")
+imp_m = mlp_importance_crossfit(X_train_q_m, train_err_m, feature_names_m)
+imp_df_m = pd.DataFrame({'feature': feature_names_m, 'importance': imp_m}).sort_values('importance', ascending=False)
+imp_df_m.to_csv(os.path.join(COMPARISON_DIR, "feature_importance_mcdropout.csv"), index=False)
+print(imp_df_m.head(5).to_string(index=False))
+
+top5_m = imp_df_m.nlargest(5, 'importance').copy()
+top5_m['importance_norm'] = top5_m['importance'] / top5_m['importance'].max()
+all_top5['MC Dropout'] = top5_m[['feature', 'importance_norm']]
+
+del enc_m, df_m, train_df_m, test_df_m
+torch.cuda.empty_cache()
+
+# ==============================================================
+# [4] XGBoost (base model) | threshold=0.11 | CrossFit | MLP
+# ==============================================================
+print("XGBoost | threshold=0.11 | CrossFit | MLP (mask included)")
+
+XGB_THR = 0.11
 
 df_x, train_df_x, test_df_x, cont_x, cat_x, uniq_x, lbl_x = load_data_with_mask()
-
-shape_x  = ShapeCfg(static_dim=len(cont_x), static_dim_cat=len(cat_x))
 
 x_train_x = np.hstack([
     train_df_x[cont_x].values.astype(np.float32),
@@ -459,18 +551,21 @@ X_train_q_x = np.hstack([x_tr_x, train_prob_x.reshape(-1,1)]).astype(np.float32)
 train_pred_x = (train_prob_x >= XGB_THR).astype(int)
 train_err_x  = (train_pred_x != train_true_x).astype(int)
 
-imp_x = xgb_importance_simple(X_train_q_x, train_err_x, feature_names_x)
-imp_df_x = pd.DataFrame({'feature': feature_names_x, 'importance_gain': imp_x}).sort_values('importance_gain', ascending=False)
+print("  Computing SHAP importance for MLP (CrossFit, 5-fold)...")
+imp_x = mlp_importance_crossfit(X_train_q_x, train_err_x, feature_names_x)
+imp_df_x = pd.DataFrame({'feature': feature_names_x, 'importance': imp_x}).sort_values('importance', ascending=False)
 imp_df_x.to_csv(os.path.join(COMPARISON_DIR, "feature_importance_xgboost.csv"), index=False)
 print(imp_df_x.head(5).to_string(index=False))
 
-top5_x = imp_df_x.nlargest(5, 'importance_gain').copy()
-top5_x['importance_norm'] = top5_x['importance_gain'] / top5_x['importance_gain'].max()
+top5_x = imp_df_x.nlargest(5, 'importance').copy()
+top5_x['importance_norm'] = top5_x['importance'] / top5_x['importance'].max()
 all_top5['XGBoost'] = top5_x[['feature', 'importance_norm']]
 
-# ------------------------------------------------------------
+# ==============================================================
 # Combined comparison plot: top-5 features across all 4 models
-# ------------------------------------------------------------
+# Note: BasicMLP/Ensemble use XGB gain, MC Dropout/XGBoost use MLP SHAP.
+# Different scales, so each model is normalized to max=1.0 before plotting.
+# ==============================================================
 print("Building combined comparison plot")
 
 MODEL_COLORS = {
@@ -480,8 +575,13 @@ MODEL_COLORS = {
     'XGBoost':       '#d62728',
 }
 MODEL_ORDER = ['BasicMLP', 'MC Dropout', 'Deep Ensemble', 'XGBoost']
+IMPORTANCE_METHOD = {
+    'BasicMLP':      'XGB gain (CrossFit)',
+    'Deep Ensemble': 'XGB gain (Simple)',
+    'MC Dropout':    'MLP SHAP (CrossFit)',
+    'XGBoost':       'MLP SHAP (CrossFit)',
+}
 
-# Union of top-5 features across all 4 models, keeping first-seen order
 union_features = list(dict.fromkeys(
     f for model in MODEL_ORDER for f in all_top5[model]['feature']
 ))
@@ -498,16 +598,18 @@ fig, ax = plt.subplots(figsize=(10, max(4, len(union_features) * 0.6)))
 for i, model in enumerate(MODEL_ORDER):
     offset = (i - (n_models - 1) / 2) * bar_height
     vals = [lookup(model, f) for f in union_features]
-    ax.barh(y + offset, vals, height=bar_height, label=model, color=MODEL_COLORS[model])
+    ax.barh(y + offset, vals, height=bar_height,
+            label=f"{model} ({IMPORTANCE_METHOD[model]})", color=MODEL_COLORS[model])
 
 ax.set_yticks(y)
 ax.set_yticklabels(union_features, fontsize=10)
 ax.invert_yaxis()
 ax.set_xlabel("Normalized Importance (within-model max = 1.0)", fontsize=11, fontweight='bold')
-ax.set_title("Q-Model Feature Importance (XGB) - Top 5 per Base Model\n"
-             "(each at its confirmed best threshold/strategy)",
-             fontsize=13, fontweight='bold')
-ax.legend(title="Base Model")
+ax.set_title("Q-Model Feature Importance - Top 5 per Base Model\n"
+             "(each at its confirmed best threshold/strategy; "
+             "XGB=gain importance, MLP=SHAP importance)",
+             fontsize=12, fontweight='bold')
+ax.legend(title="Base Model (Q-model importance method)", fontsize=8)
 ax.grid(True, alpha=0.3, axis='x')
 
 plt.tight_layout()
