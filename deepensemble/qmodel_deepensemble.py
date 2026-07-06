@@ -1,11 +1,9 @@
 """
-prob_threshold sweep for Deep Ensemble Q-model — icu_24h ONLY
-==================================================================
-변경 사항:
-  1. Mask 컬럼 추가 (교수님 지침: 딥러닝은 원본+mask)
-     base 모델(ensemble_member_*_icu24h_only_mask.pt)과 동일 input_dim 필요
-  2. Q-model 학습: val -> train
-  3. Feature Importance / SHAP / Plot 섹션 제거
+Q-model threshold sweep for the Deep Ensemble base model.
+
+Same sweep procedure as the BasicMLP version, except the Q-model input
+also includes the ensemble's uncertainty statistics (variance, entropy,
+spread) in addition to base features + base probability.
 """
 
 import sys
@@ -31,9 +29,9 @@ warnings.filterwarnings('ignore')
 from clinical_ts.template_modules import EncoderStaticBase, EncoderStaticBaseConfig
 from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
 
-# ============================================================
-# Paths
-# ============================================================
+# ------------------------------------------------------------
+# Paths / config
+# ------------------------------------------------------------
 BASE_DIR    = "/user/gaad2403/MDS-ED/key/Final/DeepEnsemble"
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
@@ -50,19 +48,15 @@ EPSILON         = 1e-10
 N_FOLDS         = 5
 RANDOM_STATE    = 42
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-MLP_HIDDEN     = [64, 32]
-MLP_EPOCHS     = 50
-MLP_LR         = 1e-3
-MLP_BATCH_SIZE = 64
-MLP_DROPOUT    = 0.3
-ENSEMBLE_FEATURE_COLS = ["prob_icu24h", "variance", "entropy", "spread"]
+MLP_HIDDEN      = [64, 32]
+MLP_EPOCHS      = 50
+MLP_LR          = 1e-3
+MLP_BATCH_SIZE  = 64
+MLP_DROPOUT     = 0.3
 
-print(f"prob_threshold sweep: {PROB_THRESHOLDS}")
-print(f"Device: {DEVICE}")
-
-# ============================================================
-# Model definitions
-# ============================================================
+# ------------------------------------------------------------
+# Model definitions (must match training script)
+# ------------------------------------------------------------
 class BasicEncoderStatic(EncoderStaticBase):
     def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
         super().__init__(hparams_encoder_static, hparams_input_shape, target_dim)
@@ -141,15 +135,13 @@ class ShapeCfg:
     sequence_last: bool = False
     channels2: int      = 0
 
-# ============================================================
+# ------------------------------------------------------------
 # 1. Load & preprocess data
-# ============================================================
-print("\nLoading data...")
+# ------------------------------------------------------------
 df = pd.read_csv(DATA_PATH, low_memory=False)
 
 input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics','demographics','labvalues','vitals']]
 
-# ✅ mask 추가
 mask_columns = []
 for c in input_cols:
     mask_col = c + '_m'
@@ -187,18 +179,15 @@ lbl_itos = ["icu_24h"]
 for c in lbl_itos:
     df["deterioration_" + c] = df["deterioration_" + c].replace(-999., np.nan)
 
-# ✅ train_df 추가
 train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True)
 val_df   = df[df['general_strat_fold'] == 18].reset_index(drop=True)
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 val_df   = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df  = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
-print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
-print(f"cont_features (mask 포함): {len(cont_features)}, cat_features: {len(cat_features)}")
 
-# ============================================================
-# 2. Dataset & DataLoader
-# ============================================================
+# ------------------------------------------------------------
+# 2. Dataset / DataLoader
+# ------------------------------------------------------------
 class TabularDataset(Dataset):
     def __init__(self, df, cont_f, cat_f, lbl_cols):
         self.cont   = torch.tensor(df[cont_f].values, dtype=torch.float32)
@@ -214,9 +203,9 @@ val_loader   = DataLoader(TabularDataset(val_df,  cont_features, cat_features, l
 test_loader  = DataLoader(TabularDataset(test_df, cont_features, cat_features, lbl_itos),
                           batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
-# ============================================================
-# 3. Load ensemble members & inference
-# ============================================================
+# ------------------------------------------------------------
+# 3. Load ensemble members, run inference
+# ------------------------------------------------------------
 shape   = ShapeCfg(static_dim=len(cont_features), static_dim_cat=len(cat_features))
 mlp_cfg = MLPConfig(
     embedding_dims=[unique_counts[c] for c in cat_features],
@@ -224,7 +213,6 @@ mlp_cfg = MLPConfig(
     lin_ftrs=LIN_FTRS
 )
 
-print(f"\nLoading {M} ensemble members...")
 ensemble_models = []
 for m in range(M):
     pt_path = os.path.join(BASE_DIR, f"ensemble_member_{m}_icu24h_only_mask.pt")
@@ -232,7 +220,6 @@ for m in range(M):
     model.load_state_dict(torch.load(pt_path, map_location=DEVICE))
     model.eval()
     ensemble_models.append(model)
-    print(f"  Loaded: {pt_path}")
 
 
 def ensemble_predict(models, loader):
@@ -262,17 +249,11 @@ def ensemble_predict(models, loader):
     return mean_pred, variance, entropy, spread, all_labels
 
 
-print("Running ensemble inference...")
-print("  Train set...")
-train_mean, train_var, train_ent, train_spr, train_labels = ensemble_predict(ensemble_models, train_loader)  # ✅
-print("  Val set...")
+train_mean, train_var, train_ent, train_spr, train_labels = ensemble_predict(ensemble_models, train_loader)
 val_mean,  val_var,  val_ent,  val_spr,  val_labels  = ensemble_predict(ensemble_models, val_loader)
-print("  Test set...")
 test_mean, test_var, test_ent, test_spr, test_labels = ensemble_predict(ensemble_models, test_loader)
-print("  Done.")
 
 train_mask = ~np.isnan(train_labels[:, ICU24H_IDX])
-val_mask   = ~np.isnan(val_labels[:,   ICU24H_IDX])
 test_mask  = ~np.isnan(test_labels[:,  ICU24H_IDX])
 
 train_prob_icu = train_mean[train_mask,   ICU24H_IDX]
@@ -281,29 +262,15 @@ train_ent_icu  = train_ent[train_mask,    ICU24H_IDX]
 train_spr_icu  = train_spr[train_mask,    ICU24H_IDX]
 train_true_icu = train_labels[train_mask, ICU24H_IDX].astype(int)
 
-val_prob_icu  = val_mean[val_mask,   ICU24H_IDX]
-val_var_icu   = val_var[val_mask,    ICU24H_IDX]
-val_ent_icu   = val_ent[val_mask,    ICU24H_IDX]
-val_spr_icu   = val_spr[val_mask,    ICU24H_IDX]
-val_true_icu  = val_labels[val_mask, ICU24H_IDX].astype(int)
-
 test_prob_icu = test_mean[test_mask,   ICU24H_IDX]
 test_var_icu  = test_var[test_mask,    ICU24H_IDX]
 test_ent_icu  = test_ent[test_mask,    ICU24H_IDX]
 test_spr_icu  = test_spr[test_mask,    ICU24H_IDX]
 test_true_icu = test_labels[test_mask, ICU24H_IDX].astype(int)
 
-print(f"Train ICU samples: {len(train_prob_icu)}")
-print(f"Val   ICU samples: {len(val_prob_icu)}")
-print(f"Test  ICU samples: {len(test_prob_icu)}")
-
-# ============================================================
-# ✅ Q-Model features (train 기준 준비)
-# ============================================================
-print("\n" + "="*70)
-print("Preparing Q-Model features (TRAIN set, base + ensemble stats)...")
-print("="*70)
-
+# ------------------------------------------------------------
+# 4. Q-model input features: base features + ensemble stats
+# ------------------------------------------------------------
 train_df_masked = train_df[train_mask].reset_index(drop=True)
 test_df_masked  = test_df[test_mask].reset_index(drop=True)
 
@@ -316,11 +283,9 @@ X_test_features = np.hstack([
     test_df_masked[cat_features].values.astype(np.float32)
 ])
 
-print(f"  Total base: {X_train_features.shape[1]}, + Ensemble stats: 4")
-
-# ============================================================
-# 4. Q-model helpers
-# ============================================================
+# ------------------------------------------------------------
+# 5. Q-model helpers
+# ------------------------------------------------------------
 class QModelMLP(nn.Module):
     def __init__(self, input_dim, hidden_dims, dropout=0.3):
         super().__init__()
@@ -359,36 +324,34 @@ def fit_predict(model_type, X_tr, y_tr, X_eval):
         return train_mlp(X_tr, y_tr.astype(np.float32), X_eval)
     else:
         m = XGBClassifier(n_estimators=200, max_depth=4, learning_rate=0.05,
-                           use_label_encoder=False, eval_metric='logloss',
+                           eval_metric='logloss',
                            random_state=RANDOM_STATE, verbosity=0)
         m.fit(X_tr, y_tr)
         return m.predict_proba(X_eval)[:, 1]
 
 
-# ✅ 인자명은 val 그대로 두되 train 데이터를 넘겨서 사용
-def get_qprobs(X_val_feat, y_val, X_test_feat,
-               val_prob_icu, val_var_icu, val_ent_icu, val_spr_icu,
+def get_qprobs(X_train_feat, y_train, X_test_feat,
+               train_prob_icu, train_var_icu, train_ent_icu, train_spr_icu,
                test_prob_icu, test_var_icu, test_ent_icu, test_spr_icu,
-               model_type, verbose_label=""):
-    X_val_q = np.hstack([
-        X_val_feat, val_prob_icu.reshape(-1,1), val_var_icu.reshape(-1,1),
-        val_ent_icu.reshape(-1,1), val_spr_icu.reshape(-1,1)
+               model_type):
+    """Simple (full-train fit) vs CrossFit (5-fold, averaged test predictions)."""
+    X_train_q = np.hstack([
+        X_train_feat, train_prob_icu.reshape(-1,1), train_var_icu.reshape(-1,1),
+        train_ent_icu.reshape(-1,1), train_spr_icu.reshape(-1,1)
     ]).astype(np.float32)
     X_test_q = np.hstack([
         X_test_feat, test_prob_icu.reshape(-1,1), test_var_icu.reshape(-1,1),
         test_ent_icu.reshape(-1,1), test_spr_icu.reshape(-1,1)
     ]).astype(np.float32)
 
-    simple = fit_predict(model_type, X_val_q, y_val, X_test_q)
+    simple = fit_predict(model_type, X_train_q, y_train, X_test_q)
 
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     test_fold_preds = []
-    for tri, vli in skf.split(X_val_q, y_val):
-        X_tr, y_tr = X_val_q[tri], y_val[tri]
-        fold_test_pred = fit_predict(model_type, X_tr, y_tr, X_test_q)
-        test_fold_preds.append(fold_test_pred)
+    for tri, _ in skf.split(X_train_q, y_train):
+        X_tr, y_tr = X_train_q[tri], y_train[tri]
+        test_fold_preds.append(fit_predict(model_type, X_tr, y_tr, X_test_q))
     cf = np.mean(test_fold_preds, axis=0)
-    print(f"    [{model_type} CF{verbose_label}] done")
 
     return simple, cf
 
@@ -411,17 +374,13 @@ def best_op(q_probs, pred_base, true_label, fp_base):
     return best
 
 
-# ============================================================
-# 5. Main sweep loop
-# ============================================================
+# ------------------------------------------------------------
+# 6. Main sweep
+# ------------------------------------------------------------
 summary_rows = []
 
-print(f"\n{'='*60}")
-print(f"Starting prob_threshold sweep: {PROB_THRESHOLDS}")
-print(f"{'='*60}")
-
 for prob_thr in PROB_THRESHOLDS:
-    print(f"\n>>> prob_threshold = {prob_thr:.2f}")
+    print(f">>> prob_thr = {prob_thr:.2f}")
 
     train_pred = (train_prob_icu >= prob_thr).astype(int)
     test_pred  = (test_prob_icu  >= prob_thr).astype(int)
@@ -434,11 +393,9 @@ for prob_thr in PROB_THRESHOLDS:
     tn_b = int(((test_pred==0)&(test_true_icu==0)).sum())
     sens_b = tp_b/(tp_b+fn_b) if (tp_b+fn_b)>0 else 0
 
-    print(f"  Baseline(test): TP={tp_b} FP={fp_b} FN={fn_b} TN={tn_b} | Sens={sens_b:.4f}")
-
     summary_rows.append(dict(
-        prob_thr=prob_thr, strategy="Baseline", model="—",
-        base_sensitivity=round(sens_b,4), best_q_thr="—", sensitivity=round(sens_b,4),
+        prob_thr=prob_thr, strategy="Baseline", model="-",
+        base_sensitivity=round(sens_b,4), best_q_thr="-", sensitivity=round(sens_b,4),
         FP_reduction_pct=0.0, TP=tp_b, FP=fp_b, FN=fn_b, TN=tn_b
     ))
 
@@ -447,7 +404,7 @@ for prob_thr in PROB_THRESHOLDS:
             X_train_features, train_err, X_test_features,
             train_prob_icu, train_var_icu, train_ent_icu, train_spr_icu,
             test_prob_icu, test_var_icu, test_ent_icu, test_spr_icu,
-            mtype, verbose_label=f" @thr={prob_thr:.2f}"
+            mtype
         )
 
         for strategy, q_probs in [("Simple", q_simple), ("CrossFit", q_cf)]:
@@ -462,20 +419,14 @@ for prob_thr in PROB_THRESHOLDS:
             else:
                 summary_rows.append(dict(
                     prob_thr=prob_thr, strategy=strategy, model=mtype,
-                    base_sensitivity=round(sens_b,4), best_q_thr="—", sensitivity="<0.80",
-                    FP_reduction_pct="—", TP="—", FP="—", FN="—", TN="—"
+                    base_sensitivity=round(sens_b,4), best_q_thr="-", sensitivity="<0.80",
+                    FP_reduction_pct="-", TP="-", FP="-", FN="-", TN="-"
                 ))
-        print(f"  {mtype} done")
 
-# ============================================================
-# 6. Save summary CSV
-# ============================================================
+# ------------------------------------------------------------
+# 7. Save summary
+# ------------------------------------------------------------
 summary_df   = pd.DataFrame(summary_rows)
 summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_ensemble_icu24h_only_mask_trainQ.csv")
 summary_df.to_csv(summary_path, index=False)
-print(f"\nSummary saved: {summary_path}")
-print(summary_df.to_string(index=False))
-
-print("\n" + "="*70)
-print("✅ All done! (mask 포함, Q-model train set 기준, feature importance 없음)")
-print("="*70)
+print(f"Summary saved: {summary_path}")

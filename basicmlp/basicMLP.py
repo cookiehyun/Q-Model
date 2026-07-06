@@ -1,19 +1,7 @@
 """
-BasicMLP Base Model — ICU-24h ONLY (단일 타깃 버전)
-=====================================================
-원본(basicMLP.py, 4개 멀티태스크)에서 icu_24h 단일 타깃으로 변경.
-(mcdropout_icu24h_only.py / ensemble_icu24h_only.py와 동일한 방식)
-
-변경 사항:
-  - target_dim: 4 → 1 (icu_24h만)
-  - label: 4개 타깃 → deterioration_icu_24h만 사용
-  - loss: bce_loss_with_nans(4개 합산) → BCEWithLogitsLoss(icu_24h만)
-  - val AUROC: icu_24h만 계산 (macro AUROC 없음)
-  - 체크포인트 선택: icu_24h AUROC 기준 (원본과 동일하지만 이제 유일한 지표)
-  - 저장 파일: best_basicmlp_icu24h_only.pt (원본과 구분)
-  - 결과 CSV: q_features_{split}_basicmlp_icu24h_only.csv
-
-나머지 구조(모델 아키텍처, Q-model feature 추출)는 원본과 동일.
+BasicMLP base model for ICU-24h deterioration prediction.
+Trains a static (tabular) MLP encoder on demographics/vitals/labs/biometrics,
+then extracts probability outputs used later as Q-model input features.
 """
 
 import sys
@@ -33,15 +21,11 @@ from collections.abc import Iterable
 from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
 import warnings
 warnings.filterwarnings('ignore')
-from clinical_ts.template_modules import ShapeConfig
-from sklearn.metrics import confusion_matrix, roc_curve, auc
-import matplotlib.pyplot as plt
 import os
 
-# ============================================================
-# Model definitions (원본과 동일)
-# ============================================================
-
+# ------------------------------------------------------------
+# Model definition
+# ------------------------------------------------------------
 class BasicEncoderStatic(EncoderStaticBase):
     def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
         super().__init__(hparams_encoder_static, hparams_input_shape, target_dim)
@@ -118,43 +102,34 @@ class BasicEncoderStaticMLPConfig(BasicEncoderStaticConfig):
     batch_norm: bool = True
 
 
-# ============================================================
+# ------------------------------------------------------------
 # Config
-# ============================================================
+# ------------------------------------------------------------
 BATCH_SIZE   = 32
 EPOCHS       = 10
 LR           = 0.001
 WEIGHT_DECAY = 0.001
 DROPOUT      = 0.5
 LIN_FTRS     = [128, 128, 128]
+TARGET_TASK  = "icu_24h"
 
-# ✅ icu_24h ONLY: 단일 타깃 (원본은 4개)
-TARGET_TASK = "icu_24h"
-
-# ============================================================
-# Directory setup
-# ============================================================
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
 PNG_DIR     = os.path.join(RESULTS_DIR, "png")
-
 os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(PNG_DIR, exist_ok=True)
-print(f"Results → {RESULTS_DIR}")
 
 DATA_PATH = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
 
-# ============================================================
+# ------------------------------------------------------------
 # 1. Load data
-# ============================================================
-print("Loading data...")
+# ------------------------------------------------------------
 df = pd.read_csv(DATA_PATH, low_memory=False)
-print(f"shape: {df.shape}")
 
 input_cols = [c for c in df.columns if c.split("_")[0] in ['biometrics', 'demographics', 'labvalues', 'vitals']]
 
-# ✅ [교수님 원안 반영] 딥러닝 모델은 mask 컬럼 포함 (notna 기준: 1=값 있음, 0=결측)
+# Add a mask column per feature: 1 if observed, 0 if missing
 mask_columns = []
 for c in input_cols:
     mask_col = c + '_m'
@@ -172,8 +147,7 @@ unique_counts = {c: len(np.unique(np.array(df[c]))) for c in input_cols}
 cat_features  = [c for c, v in unique_counts.items()
                  if v < 10 and not c.endswith("nan") and not c.startswith("labvalues")]
 cont_features = [c for c in input_cols if c not in cat_features]
-# ✅ mask 컬럼은 연속형 취급으로 cont_features에 추가 (embedding 불필요, 0/1 그대로 입력)
-cont_features = cont_features + mask_columns
+cont_features = cont_features + mask_columns  # mask columns treated as continuous (0/1)
 
 df["vitals_acuity"] = df["vitals_acuity"].apply(lambda x: int(x) - 1)
 
@@ -188,8 +162,7 @@ df["demographics_ethnicity"] = df.apply(
     lambda row: np.where([row[c] for c in lbl_itos_ethnicity])[0][0], axis=1
 )
 df.drop(lbl_itos_ethnicity, axis=1, inplace=True)
-# ✅ ethnicity 원-핫 컬럼들이 병합되며 사라지므로, 그에 대응하던 mask 컬럼도 같이 제거
-#    (ethnicity는 원래 결측이 없는 데모그래픽 변수라 mask 의미가 없음)
+# The one-hot ethnicity columns are merged, so drop their (unused) mask columns too
 ethnicity_masks = [c + '_m' for c in lbl_itos_ethnicity if (c + '_m') in df.columns]
 if ethnicity_masks:
     df.drop(ethnicity_masks, axis=1, inplace=True)
@@ -199,14 +172,11 @@ input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics', 'dem
 cat_features  = [c for c in input_cols if c in cat_features]
 cont_features = [c for c in input_cols if c not in cat_features]
 
-# ✅ icu_24h만 처리
 df["deterioration_" + TARGET_TASK] = df["deterioration_" + TARGET_TASK].replace(-999., np.nan)
 
-print(f"categorical features: {len(cat_features)}, continuous features: {len(cont_features)}")
-
-# ============================================================
-# 2. Train / Val / Test split
-# ============================================================
+# ------------------------------------------------------------
+# 2. Train / val / test split
+# ------------------------------------------------------------
 train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True)
 val_df   = df[df['general_strat_fold'] == 18].reset_index(drop=True)
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
@@ -214,11 +184,9 @@ test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 val_df  = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 
-print(f"Train: {len(train_df)}, Validation: {len(val_df)}, Test: {len(test_df)}")
-
-# ============================================================
-# 3. Dataset — ✅ label: icu_24h 단일 컬럼만
-# ============================================================
+# ------------------------------------------------------------
+# 3. Dataset
+# ------------------------------------------------------------
 class TabularDataset(Dataset):
     def __init__(self, df, cont_features, cat_features, target_task):
         self.cont   = torch.tensor(df[cont_features].values, dtype=torch.float32)
@@ -242,9 +210,9 @@ train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_wo
 val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
-# ============================================================
-# 4. Model
-# ============================================================
+# ------------------------------------------------------------
+# 4. Model setup
+# ------------------------------------------------------------
 @dataclass
 class MLPConfig:
     embedding_dims: List[int] = field(default_factory=lambda: [16, 16, 16])
@@ -268,14 +236,11 @@ mlp_cfg = MLPConfig(
     vocab_sizes=[unique_counts[c] for c in cat_features],
     lin_ftrs=LIN_FTRS
 )
-# ✅ target_dim=1
 encoder = BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1)
-print(f"Model parameters: {sum(p.numel() for p in encoder.parameters()):,}")
-print(f"Output dim: 1 (icu_24h only)")
 
-# ============================================================
+# ------------------------------------------------------------
 # 5. Loss & optimizer
-# ============================================================
+# ------------------------------------------------------------
 def icu24h_loss(preds, targets):
     mask = ~torch.isnan(targets)
     if mask.sum() == 0:
@@ -284,13 +249,11 @@ def icu24h_loss(preds, targets):
 
 optimizer = torch.optim.AdamW(encoder.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device: {device}")
 encoder   = encoder.to(device)
 
-# ============================================================
-# 6. Training loop
-#    ✅ 체크포인트 선택: icu_24h AUROC (이제 유일한 지표, macro 없음)
-# ============================================================
+# ------------------------------------------------------------
+# 6. Training loop (checkpoint on best val AUROC)
+# ------------------------------------------------------------
 best_val_auroc_icu24h = 0
 best_epoch            = 0
 
@@ -317,10 +280,9 @@ for epoch in range(EPOCHS):
             all_preds.append(logits.cpu().numpy())
             all_labels.append(labels.numpy())
 
-    all_preds  = np.concatenate(all_preds,  axis=0)  # (N, 1)
-    all_labels = np.concatenate(all_labels, axis=0)  # (N, 1)
+    all_preds  = np.concatenate(all_preds,  axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
 
-    # ✅ icu_24h AUROC만 계산 (macro 없음)
     mask = ~np.isnan(all_labels[:, 0])
     if mask.sum() > 0 and len(np.unique(all_labels[mask, 0])) > 1:
         val_auroc_icu24h = roc_auc_score(all_labels[mask, 0], all_preds[mask, 0])
@@ -328,23 +290,22 @@ for epoch in range(EPOCHS):
         val_auroc_icu24h = float('nan')
 
     print(f"Epoch {epoch+1:02d}/{EPOCHS} | loss: {train_loss/len(train_loader):.4f} | "
-          f"val icu_24h AUROC: {val_auroc_icu24h:.4f}")
+          f"val AUROC: {val_auroc_icu24h:.4f}")
 
     if not np.isnan(val_auroc_icu24h) and val_auroc_icu24h > best_val_auroc_icu24h:
         best_val_auroc_icu24h = val_auroc_icu24h
         best_epoch            = epoch + 1
-        # ✅ 파일명 구분
         torch.save(encoder.state_dict(), os.path.join(BASE_DIR, 'best_basicmlp_icu24h_only.pt'))
 
-print(f"\nBest val icu_24h AUROC: {best_val_auroc_icu24h:.4f} at epoch {best_epoch}")
+print(f"Best val AUROC: {best_val_auroc_icu24h:.4f} at epoch {best_epoch}")
 
-# ============================================================
-# 7. ✅ Inference & Q-model feature extraction
-# ============================================================
+# ------------------------------------------------------------
+# 7. Inference + Q-model feature export
+# ------------------------------------------------------------
 encoder.load_state_dict(torch.load(os.path.join(BASE_DIR, 'best_basicmlp_icu24h_only.pt'), map_location=device))
 encoder.eval()
 
-PROB_THRESHOLD = 0.10   # fixed operating point (sensitivity ≈ 0.80)
+PROB_THRESHOLD = 0.10  # fixed operating point (sensitivity ~ 0.80)
 
 def extract_qmodel_features(loader, df_ref, split_name):
     all_probs, all_labels = [], []
@@ -357,31 +318,26 @@ def extract_qmodel_features(loader, df_ref, split_name):
             all_probs.append(probs.cpu().numpy())
             all_labels.append(labels.numpy())
 
-    all_probs  = np.concatenate(all_probs,  axis=0)   # (N, 1)
-    all_labels = np.concatenate(all_labels, axis=0)   # (N, 1)
+    all_probs  = np.concatenate(all_probs,  axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
 
     prob_icu  = all_probs[:, 0]
     true_icu  = all_labels[:, 0]
 
     valid_mask = ~np.isnan(true_icu)
-
     prob_icu  = prob_icu[valid_mask]
     true_icu  = true_icu[valid_mask]
 
-    pred_icu  = (prob_icu >= PROB_THRESHOLD).astype(int)
+    pred_icu     = (prob_icu >= PROB_THRESHOLD).astype(int)
     true_icu_int = true_icu.astype(int)
-
-    error_label = (pred_icu != true_icu_int).astype(int)
+    error_label  = (pred_icu != true_icu_int).astype(int)  # base model's prediction was wrong
 
     tp = int(((pred_icu == 1) & (true_icu_int == 1)).sum())
     fp = int(((pred_icu == 1) & (true_icu_int == 0)).sum())
     fn = int(((pred_icu == 0) & (true_icu_int == 1)).sum())
     tn = int(((pred_icu == 0) & (true_icu_int == 0)).sum())
-
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
-    print(f"\n[{split_name}] threshold={PROB_THRESHOLD}")
-    print(f"  TP={tp}, FP={fp}, FN={fn}, TN={tn}")
-    print(f"  Sensitivity={sensitivity:.4f} | error samples={error_label.sum()} / {len(error_label)}")
+    print(f"[{split_name}] thr={PROB_THRESHOLD} TP={tp} FP={fp} FN={fn} TN={tn} sens={sensitivity:.4f}")
 
     out_df = pd.DataFrame({
         "prob_icu24h":  prob_icu,
@@ -390,16 +346,15 @@ def extract_qmodel_features(loader, df_ref, split_name):
         "error_label":  error_label,
     })
 
-    # ✅ 파일명 구분
     fname = os.path.join(CSV_DIR, f"q_features_{split_name}_basicmlp_icu24h_only.csv")
     out_df.to_csv(fname, index=False)
-    print(f"  Saved → {fname}")
+    print(f"Saved -> {fname}")
     return out_df
 
 
 val_features  = extract_qmodel_features(val_loader,  val_df,  "val")
 test_features = extract_qmodel_features(test_loader, test_df, "test")
 
-print("\n✅ Done. Q-model input files ready:")
-print(f"   {CSV_DIR}/q_features_val_basicmlp_icu24h_only.csv  → use for Q-model training")
-print(f"   {CSV_DIR}/q_features_test_basicmlp_icu24h_only.csv → use for Q-model evaluation")
+print("Done. Q-model input files ready:")
+print(f"  {CSV_DIR}/q_features_val_basicmlp_icu24h_only.csv  (for training the Q-model)")
+print(f"  {CSV_DIR}/q_features_test_basicmlp_icu24h_only.csv (for evaluating the Q-model)")

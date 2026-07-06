@@ -1,10 +1,9 @@
 """
-Deep Ensemble Base Model — ICU-24h ONLY + mask 포함 (교수님 지침)
-=====================================================================
-변경: 원본 ensemble_icu24h_only.py에 mask 컬럼 추가.
-      (딥러닝 base 모델은 원본+mask 사용 — 교수님 demo.ipynb 지침)
-      mask는 notna() 기준 (1=값 있음, 0=결측).
-      체크포인트 파일명: ensemble_member_{m}_icu24h_only_mask.pt
+Deep Ensemble base model for ICU-24h deterioration prediction.
+Trains M=5 independently-initialized MLP encoders (mask included as features).
+At inference time, the ensemble mean is used as the probability, and
+variance / entropy / spread across members are used as uncertainty
+features for the downstream Q-model.
 """
 
 import sys
@@ -24,14 +23,13 @@ from collections.abc import Iterable
 from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import os
 import warnings
 warnings.filterwarnings('ignore')
 
-# ============================================================
-# Model Definition (원본과 동일)
-# ============================================================
+# ------------------------------------------------------------
+# Model definition
+# ------------------------------------------------------------
 class BasicEncoderStatic(EncoderStaticBase):
     def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
         super().__init__(hparams_encoder_static, hparams_input_shape, target_dim)
@@ -43,7 +41,7 @@ class BasicEncoderStatic(EncoderStaticBase):
         for v, e in zip(hparams_encoder_static.vocab_sizes, hparams_encoder_static.embedding_dims):
             self.embeddings.append(nn.Embedding(v, e))
         self.input_dim      = int(np.sum(hparams_encoder_static.embedding_dims) + hparams_input_shape.static_dim)
-        self.input_channels = hparams_input_shape.static_dim + hparams_input_shape.static_dim_cat
+        self.input_channels  = hparams_input_shape.static_dim + hparams_input_shape.static_dim_cat
 
     def embed(self, **kwargs):
         static     = kwargs.get("static", None)
@@ -104,19 +102,18 @@ class BasicEncoderStaticMLPConfig(BasicEncoderStaticConfig):
     batch_norm: bool  = True
 
 
-# ============================================================
+# ------------------------------------------------------------
 # Config
-# ============================================================
-BATCH_SIZE   = 32
-EPOCHS       = 10
-LR           = 0.001
-WEIGHT_DECAY = 0.001
-LIN_FTRS     = [128, 128, 128]
-M            = 5
-PROB_THRESHOLD = 0.10
-EPSILON      = 1e-10
-PERCENTILES  = [75, 90, 95]
-TARGET_TASK = "icu_24h"
+# ------------------------------------------------------------
+BATCH_SIZE      = 32
+EPOCHS          = 10
+LR              = 0.001
+WEIGHT_DECAY    = 0.001
+LIN_FTRS        = [128, 128, 128]
+M               = 5          # number of ensemble members
+PROB_THRESHOLD  = 0.10
+EPSILON         = 1e-10
+TARGET_TASK     = "icu_24h"
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
@@ -124,20 +121,16 @@ CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
 PNG_DIR     = os.path.join(RESULTS_DIR, "png")
 os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(PNG_DIR, exist_ok=True)
-print(f"Results → {RESULTS_DIR}")
 
 DATA_PATH = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
 
-# ============================================================
+# ------------------------------------------------------------
 # 1. Load data
-# ============================================================
-print("Loading data...")
+# ------------------------------------------------------------
 df = pd.read_csv(DATA_PATH, low_memory=False)
-print(f"shape: {df.shape}")
 
-input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics', 'demographics', 'labvalues', 'vitals']]
+input_cols = [c for c in df.columns if c.split("_")[0] in ['biometrics', 'demographics', 'labvalues', 'vitals']]
 
-# ✅ [교수님 원안] 딥러닝 모델은 mask 컬럼 포함 (notna 기준: 1=값 있음, 0=결측)
 mask_columns = []
 for c in input_cols:
     mask_col = c + '_m'
@@ -155,7 +148,7 @@ unique_counts = {c: len(np.unique(np.array(df[c]))) for c in input_cols}
 cat_features  = [c for c, v in unique_counts.items()
                  if v < 10 and not c.endswith("nan") and not c.startswith("labvalues")]
 cont_features = [c for c in input_cols if c not in cat_features]
-cont_features = cont_features + mask_columns  # ✅ mask 추가
+cont_features = cont_features + mask_columns
 
 df["vitals_acuity"] = df["vitals_acuity"].apply(lambda x: int(x) - 1)
 
@@ -170,7 +163,6 @@ df["demographics_ethnicity"] = df.apply(
     lambda row: np.where([row[c] for c in lbl_itos_ethnicity])[0][0], axis=1
 )
 df.drop(lbl_itos_ethnicity, axis=1, inplace=True)
-# ✅ ethnicity 원-핫이 병합되며 사라지므로 대응 mask도 제거
 ethnicity_masks = [c + '_m' for c in lbl_itos_ethnicity if (c + '_m') in df.columns]
 if ethnicity_masks:
     df.drop(ethnicity_masks, axis=1, inplace=True)
@@ -178,26 +170,23 @@ if ethnicity_masks:
 
 input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics', 'demographics', 'labvalues', 'vitals']]
 cat_features  = [c for c in input_cols if c in cat_features]
-cont_features = [c for c in input_cols if c not in cat_features]  # mask 자동 재포함됨
+cont_features = [c for c in input_cols if c not in cat_features]
 
 df["deterioration_" + TARGET_TASK] = df["deterioration_" + TARGET_TASK].replace(-999., np.nan)
 
-print(f"categorical: {len(cat_features)}, continuous (mask 포함): {len(cont_features)}")
-
-# ============================================================
+# ------------------------------------------------------------
 # 2. Split
-# ============================================================
+# ------------------------------------------------------------
 train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True)
 val_df   = df[df['general_strat_fold'] == 18].reset_index(drop=True)
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 
 val_df  = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
-print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
-# ============================================================
+# ------------------------------------------------------------
 # 3. Dataset
-# ============================================================
+# ------------------------------------------------------------
 class TabularDataset(Dataset):
     def __init__(self, df, cont_features, cat_features, target_task):
         self.cont   = torch.tensor(df[cont_features].values, dtype=torch.float32)
@@ -214,9 +203,9 @@ train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_wo
 val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
-# ============================================================
+# ------------------------------------------------------------
 # 4. Model config
-# ============================================================
+# ------------------------------------------------------------
 @dataclass
 class MLPConfig:
     embedding_dims: List[int] = field(default_factory=lambda: [])
@@ -238,7 +227,6 @@ mlp_cfg = MLPConfig(
 )
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device: {device}")
 
 def build_model():
     return BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1)
@@ -249,17 +237,13 @@ def icu24h_loss(preds, targets):
         return torch.tensor(0.0, requires_grad=True)
     return nn.BCEWithLogitsLoss()(preds[mask], targets[mask])
 
-# ============================================================
-# 5. Train M ensemble members
-# ============================================================
-print(f"\nTraining Deep Ensemble (M={M}, icu_24h ONLY, mask 포함)...")
-
+# ------------------------------------------------------------
+# 5. Train M ensemble members (different seed per member)
+# ------------------------------------------------------------
 ensemble_models = []
 
 for m in range(M):
-    print(f"\n{'='*50}")
-    print(f"  Member {m+1}/{M}")
-    print(f"{'='*50}")
+    print(f"--- Member {m+1}/{M} ---")
 
     torch.manual_seed(m * 42)
     np.random.seed(m * 42)
@@ -298,25 +282,21 @@ for m in range(M):
         else:
             val_auroc_icu24h = float('nan')
 
-        print(f"  Epoch {epoch+1:02d}/{EPOCHS} | loss: {train_loss/len(train_loader):.4f} | "
-              f"val icu_24h AUROC: {val_auroc_icu24h:.4f}")
+        print(f"  epoch {epoch+1:02d}/{EPOCHS} | loss {train_loss/len(train_loader):.4f} | val AUROC {val_auroc_icu24h:.4f}")
 
         if not np.isnan(val_auroc_icu24h) and val_auroc_icu24h > best_val_auroc_icu24h:
             best_val_auroc_icu24h = val_auroc_icu24h
             best_epoch             = epoch + 1
-            # ✅ mask 포함 버전 구분 파일명
             torch.save(model.state_dict(), os.path.join(BASE_DIR, f'ensemble_member_{m}_icu24h_only_mask.pt'))
 
-    print(f"  Best val icu_24h AUROC: {best_val_auroc_icu24h:.4f} at epoch {best_epoch}")
+    print(f"  best val AUROC {best_val_auroc_icu24h:.4f} at epoch {best_epoch}")
     model.load_state_dict(torch.load(os.path.join(BASE_DIR, f'ensemble_member_{m}_icu24h_only_mask.pt'), map_location=device))
     model.eval()
     ensemble_models.append(model)
 
-print(f"\nAll {M} members trained.")
-
-# ============================================================
-# 6. Ensemble prediction
-# ============================================================
+# ------------------------------------------------------------
+# 6. Ensemble prediction: mean / variance / entropy / spread
+# ------------------------------------------------------------
 def ensemble_predict(models, loader, device):
     all_preds_per_model = []
     for model in models:
@@ -344,32 +324,13 @@ def ensemble_predict(models, loader, device):
     return mean_pred, variance, entropy, spread, all_labels
 
 
-print("\nRunning ensemble inference...")
-print("  Val set...")
-val_mean, val_var, val_entropy, val_spread, val_labels = ensemble_predict(
-    ensemble_models, val_loader, device
-)
-print("  Test set...")
-test_mean, test_var, test_entropy, test_spread, test_labels = ensemble_predict(
-    ensemble_models, test_loader, device
-)
-print("  Done.")
+print("Running ensemble inference...")
+val_mean, val_var, val_entropy, val_spread, val_labels = ensemble_predict(ensemble_models, val_loader, device)
+test_mean, test_var, test_entropy, test_spread, test_labels = ensemble_predict(ensemble_models, test_loader, device)
 
-mask_val  = ~np.isnan(val_labels[:,  0])
-mask_test = ~np.isnan(test_labels[:, 0])
-
-print(f"\n[Sanity] Val  — mean: {val_mean[mask_val,   0].mean():.4f} "
-      f"| var: {val_var[mask_val,    0].mean():.6f} "
-      f"| entropy: {val_entropy[mask_val, 0].mean():.4f} "
-      f"| spread: {val_spread[mask_val, 0].mean():.4f}")
-print(f"[Sanity] Test — mean: {test_mean[mask_test, 0].mean():.4f} "
-      f"| var: {test_var[mask_test,  0].mean():.6f} "
-      f"| entropy: {test_entropy[mask_test, 0].mean():.4f} "
-      f"| spread: {test_spread[mask_test, 0].mean():.4f}")
-
-# ============================================================
-# 7. Q-model feature extraction
-# ============================================================
+# ------------------------------------------------------------
+# 7. Q-model feature export
+# ------------------------------------------------------------
 def extract_qmodel_features(mean_probs, variance, entropy, spread, labels, split_name):
     mask        = ~np.isnan(labels[:, 0])
     prob_icu    = mean_probs[mask, 0]
@@ -386,11 +347,7 @@ def extract_qmodel_features(mean_probs, variance, entropy, spread, labels, split
     fn = int(((pred_icu == 0) & (true_icu == 1)).sum())
     tn = int(((pred_icu == 0) & (true_icu == 0)).sum())
     sens = tp / (tp + fn) if (tp + fn) > 0 else 0
-    far  = fp / (tp + fp) * 100 if (tp + fp) > 0 else 0
-
-    print(f"\n[{split_name}] threshold={PROB_THRESHOLD}")
-    print(f"  TP={tp}, FP={fp}, FN={fn}, TN={tn}")
-    print(f"  Sensitivity={sens:.4f} | FAR={far:.2f}% | errors={error_label.sum()}/{len(error_label)}")
+    print(f"[{split_name}] TP={tp} FP={fp} FN={fn} TN={tn} sens={sens:.4f}")
 
     out_df = pd.DataFrame({
         "prob_icu24h": prob_icu, "variance": var_icu, "entropy": ent_icu, "spread": spr_icu,
@@ -398,13 +355,10 @@ def extract_qmodel_features(mean_probs, variance, entropy, spread, labels, split
     })
     fname = os.path.join(CSV_DIR, f"q_features_{split_name}_ensemble_icu24h_only_mask.csv")
     out_df.to_csv(fname, index=False)
-    print(f"  Saved → {fname}")
+    print(f"Saved -> {fname}")
     return out_df
 
 val_features  = extract_qmodel_features(val_mean,  val_var,  val_entropy,  val_spread,  val_labels,  "val")
 test_features = extract_qmodel_features(test_mean, test_var, test_entropy, test_spread, test_labels, "test")
 
-print("\n" + "="*60)
-print("✅ Deep Ensemble (icu_24h ONLY, mask 포함) pipeline complete.")
-print(f"   Models : {BASE_DIR}/ensemble_member_*_icu24h_only_mask.pt")
-print("="*60)
+print("Deep Ensemble pipeline complete.")

@@ -1,10 +1,9 @@
 """
-prob_threshold sweep for MC Dropout Q-model — icu_24h ONLY
-==================================================================
-변경 사항:
-  1. Mask 컬럼 추가 (base 모델: best_mcdropout_icu24h_only_mask.pt)
-  2. Q-model 학습: val -> train
-  3. Feature Importance / SHAP / Plot 섹션 제거
+Q-model threshold sweep for the MC Dropout base model.
+
+Same sweep procedure as the BasicMLP version, except the Q-model input
+also includes the MC Dropout uncertainty statistics (variance, entropy)
+in addition to base features + base probability.
 """
 
 import sys
@@ -19,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import List
 from torch.utils.data import DataLoader, TensorDataset, Dataset
 from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler   # ← 이 줄 추가
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, brier_score_loss
 from xgboost import XGBClassifier
@@ -31,9 +30,9 @@ warnings.filterwarnings('ignore')
 from clinical_ts.template_modules import EncoderStaticBase, EncoderStaticBaseConfig
 from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
 
-# ============================================================
-# Paths
-# ============================================================
+# ------------------------------------------------------------
+# Paths / config
+# ------------------------------------------------------------
 BASE_DIR    = "/user/gaad2403/MDS-ED/key/Final/MCdropout"
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
@@ -51,18 +50,15 @@ EPSILON         = 1e-10
 N_FOLDS         = 5
 RANDOM_STATE    = 42
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-MLP_HIDDEN     = [64, 32]
-MLP_EPOCHS     = 50
-MLP_LR         = 1e-3
-MLP_BATCH_SIZE = 64
-MLP_DROPOUT    = 0.3
+MLP_HIDDEN      = [64, 32]
+MLP_EPOCHS      = 50
+MLP_LR          = 1e-3
+MLP_BATCH_SIZE  = 64
+MLP_DROPOUT     = 0.3
 
-print(f"prob_threshold sweep: {PROB_THRESHOLDS}")
-print(f"Device: {DEVICE}")
-
-# ============================================================
-# Model definitions
-# ============================================================
+# ------------------------------------------------------------
+# Model definitions (must match training script)
+# ------------------------------------------------------------
 class BasicEncoderStatic(EncoderStaticBase):
     def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
         super().__init__(hparams_encoder_static, hparams_input_shape, target_dim)
@@ -141,10 +137,9 @@ class ShapeCfg:
     sequence_last: bool = False
     channels2: int      = 0
 
-# ============================================================
+# ------------------------------------------------------------
 # 1. Load & preprocess data
-# ============================================================
-print("\nLoading data...")
+# ------------------------------------------------------------
 df = pd.read_csv(DATA_PATH, low_memory=False)
 
 input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics','demographics','labvalues','vitals']]
@@ -191,11 +186,10 @@ val_df   = df[df['general_strat_fold'] == 18].reset_index(drop=True)
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 val_df   = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df  = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
-print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
-# ============================================================
-# 2. Dataset & DataLoader
-# ============================================================
+# ------------------------------------------------------------
+# 2. Dataset / DataLoader
+# ------------------------------------------------------------
 class TabularDataset(Dataset):
     def __init__(self, df, cont_f, cat_f, lbl_cols):
         self.cont   = torch.tensor(df[cont_f].values, dtype=torch.float32)
@@ -211,9 +205,9 @@ val_loader   = DataLoader(TabularDataset(val_df,  cont_features, cat_features, l
 test_loader  = DataLoader(TabularDataset(test_df, cont_features, cat_features, lbl_itos),
                           batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
-# ============================================================
-# 3. Load MC Dropout model & run T=50 forward passes
-# ============================================================
+# ------------------------------------------------------------
+# 3. Load MC Dropout model, run T=50 stochastic forward passes
+# ------------------------------------------------------------
 shape   = ShapeCfg(static_dim=len(cont_features), static_dim_cat=len(cat_features))
 mlp_cfg = MLPConfig(
     embedding_dims=[unique_counts[c] for c in cat_features],
@@ -222,11 +216,10 @@ mlp_cfg = MLPConfig(
 )
 encoder = BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1).to(DEVICE)
 encoder.load_state_dict(torch.load(PT_PATH, map_location=DEVICE))
-print(f"Loaded: {PT_PATH}")
 
 
 def mc_dropout_predict(loader, model, T=50):
-    model.train()
+    model.train()  # keep dropout active during inference
     all_samples, all_labels = [], []
     with torch.no_grad():
         for cont, cat, labels in loader:
@@ -249,14 +242,9 @@ def mc_dropout_predict(loader, model, T=50):
     return mean_probs, variance, entropy, all_labels
 
 
-print(f"\nRunning MC Dropout inference (T={MC_SAMPLES})...")
-print("  Train set...")
-train_mean, train_var, train_ent, train_labels = mc_dropout_predict(train_loader, encoder, MC_SAMPLES)  # ✅
-print("  Val set...")
+train_mean, train_var, train_ent, train_labels = mc_dropout_predict(train_loader, encoder, MC_SAMPLES)
 val_mean,  val_var,  val_ent,  val_labels  = mc_dropout_predict(val_loader,  encoder, MC_SAMPLES)
-print("  Test set...")
 test_mean, test_var, test_ent, test_labels = mc_dropout_predict(test_loader, encoder, MC_SAMPLES)
-print("  Done.")
 
 train_mask = ~np.isnan(train_labels)
 val_mask   = ~np.isnan(val_labels)
@@ -271,17 +259,9 @@ val_true_icu  = val_labels[val_mask].astype(int)
 test_prob_icu = test_mean[test_mask]; test_var_icu = test_var[test_mask]; test_ent_icu = test_ent[test_mask]
 test_true_icu = test_labels[test_mask].astype(int)
 
-print(f"Train ICU samples: {len(train_prob_icu)}")
-print(f"Val   ICU samples: {len(val_prob_icu)}")
-print(f"Test  ICU samples: {len(test_prob_icu)}")
-
-# ============================================================
-# ✅ Q-Model features (train 기준)
-# ============================================================
-print("\n" + "="*70)
-print("Preparing Q-Model features (TRAIN set, base + MC stats)...")
-print("="*70)
-
+# ------------------------------------------------------------
+# 4. Q-model input features: base features + MC stats
+# ------------------------------------------------------------
 train_df_masked = train_df[train_mask].reset_index(drop=True)
 test_df_masked  = test_df[test_mask].reset_index(drop=True)
 
@@ -294,11 +274,9 @@ X_test_features = np.hstack([
     test_df_masked[cat_features].values.astype(np.float32)
 ])
 
-print(f"  Total base: {X_train_features.shape[1]}, + MC stats: 3")
-
-# ============================================================
-# 4. Q-model helpers
-# ============================================================
+# ------------------------------------------------------------
+# 5. Q-model helpers
+# ------------------------------------------------------------
 class QModelMLP(nn.Module):
     def __init__(self, input_dim, hidden_dims, dropout=0.3):
         super().__init__()
@@ -347,27 +325,26 @@ def fit_predict(model_type, X_tr, y_tr, X_eval):
         return m.predict_proba(X_eval)[:, 1]
 
 
-def get_qprobs(X_val_feat, y_val, X_test_feat,
-               val_prob_icu, val_var_icu, val_ent_icu,
+def get_qprobs(X_train_feat, y_train, X_test_feat,
+               train_prob_icu, train_var_icu, train_ent_icu,
                test_prob_icu, test_var_icu, test_ent_icu,
-               model_type, verbose_label=""):
-    X_val_q = np.hstack([
-        X_val_feat, val_prob_icu.reshape(-1,1), val_var_icu.reshape(-1,1), val_ent_icu.reshape(-1,1)
+               model_type):
+    """Simple (full-train fit) vs CrossFit (5-fold, averaged test predictions)."""
+    X_train_q = np.hstack([
+        X_train_feat, train_prob_icu.reshape(-1,1), train_var_icu.reshape(-1,1), train_ent_icu.reshape(-1,1)
     ]).astype(np.float32)
     X_test_q = np.hstack([
         X_test_feat, test_prob_icu.reshape(-1,1), test_var_icu.reshape(-1,1), test_ent_icu.reshape(-1,1)
     ]).astype(np.float32)
 
-    simple = fit_predict(model_type, X_val_q, y_val, X_test_q)
+    simple = fit_predict(model_type, X_train_q, y_train, X_test_q)
 
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     test_fold_preds = []
-    for tri, vli in skf.split(X_val_q, y_val):
-        X_tr, y_tr = X_val_q[tri], y_val[tri]
-        fold_test_pred = fit_predict(model_type, X_tr, y_tr, X_test_q)
-        test_fold_preds.append(fold_test_pred)
+    for tri, _ in skf.split(X_train_q, y_train):
+        X_tr, y_tr = X_train_q[tri], y_train[tri]
+        test_fold_preds.append(fit_predict(model_type, X_tr, y_tr, X_test_q))
     cf = np.mean(test_fold_preds, axis=0)
-    print(f"    [{model_type} CF{verbose_label}] done")
 
     return simple, cf
 
@@ -390,17 +367,13 @@ def best_op(q_probs, pred_base, true_label, fp_base):
     return best
 
 
-# ============================================================
-# 5. Main sweep loop
-# ============================================================
+# ------------------------------------------------------------
+# 6. Main sweep
+# ------------------------------------------------------------
 summary_rows = []
 
-print(f"\n{'='*60}")
-print(f"Starting prob_threshold sweep: {PROB_THRESHOLDS}")
-print(f"{'='*60}")
-
 for prob_thr in PROB_THRESHOLDS:
-    print(f"\n>>> prob_threshold = {prob_thr:.2f}")
+    print(f">>> prob_thr = {prob_thr:.2f}")
 
     train_pred = (train_prob_icu >= prob_thr).astype(int)
     test_pred  = (test_prob_icu  >= prob_thr).astype(int)
@@ -413,11 +386,9 @@ for prob_thr in PROB_THRESHOLDS:
     tn_b = int(((test_pred==0)&(test_true_icu==0)).sum())
     sens_b = tp_b/(tp_b+fn_b) if (tp_b+fn_b)>0 else 0
 
-    print(f"  Baseline(test): TP={tp_b} FP={fp_b} FN={fn_b} TN={tn_b} | Sens={sens_b:.4f}")
-
     summary_rows.append(dict(
-        prob_thr=prob_thr, strategy="Baseline", model="—",
-        base_sensitivity=round(sens_b,4), best_q_thr="—", sensitivity=round(sens_b,4),
+        prob_thr=prob_thr, strategy="Baseline", model="-",
+        base_sensitivity=round(sens_b,4), best_q_thr="-", sensitivity=round(sens_b,4),
         FP_reduction_pct=0.0, TP=tp_b, FP=fp_b, FN=fn_b, TN=tn_b
     ))
 
@@ -426,7 +397,7 @@ for prob_thr in PROB_THRESHOLDS:
             X_train_features, train_err, X_test_features,
             train_prob_icu, train_var_icu, train_ent_icu,
             test_prob_icu, test_var_icu, test_ent_icu,
-            mtype, verbose_label=f" @thr={prob_thr:.2f}"
+            mtype
         )
 
         for strategy, q_probs in [("Simple", q_simple), ("CrossFit", q_cf)]:
@@ -441,20 +412,14 @@ for prob_thr in PROB_THRESHOLDS:
             else:
                 summary_rows.append(dict(
                     prob_thr=prob_thr, strategy=strategy, model=mtype,
-                    base_sensitivity=round(sens_b,4), best_q_thr="—", sensitivity="<0.80",
-                    FP_reduction_pct="—", TP="—", FP="—", FN="—", TN="—"
+                    base_sensitivity=round(sens_b,4), best_q_thr="-", sensitivity="<0.80",
+                    FP_reduction_pct="-", TP="-", FP="-", FN="-", TN="-"
                 ))
-        print(f"  {mtype} done")
 
-# ============================================================
-# 6. Save summary CSV
-# ============================================================
+# ------------------------------------------------------------
+# 7. Save summary
+# ------------------------------------------------------------
 summary_df = pd.DataFrame(summary_rows)
 summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_mcdropout_icu24h_only_mask_trainQ.csv")
 summary_df.to_csv(summary_path, index=False)
-print(f"\nSummary saved: {summary_path}")
-print(summary_df.to_string(index=False))
-
-print("\n" + "="*70)
-print("✅ All done! (mask 포함, Q-model train set 기준, feature importance 없음)")
-print("="*70)
+print(f"Summary saved: {summary_path}")

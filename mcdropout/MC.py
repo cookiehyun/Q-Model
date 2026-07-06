@@ -1,9 +1,9 @@
 """
-MC Dropout Base Model — ICU-24h ONLY + mask 포함 (교수님 지침)
-=====================================================================
-변경: 원본 mcdropout_icu24h_only.py에 mask 컬럼 추가.
-      mask는 notna() 기준 (1=값 있음, 0=결측).
-      체크포인트 파일명: best_mcdropout_icu24h_only_mask.pt
+MC Dropout base model for ICU-24h deterioration prediction.
+Trains a single MLP encoder (mask included), then at inference time
+keeps dropout active and runs T=50 stochastic forward passes per sample.
+The mean prediction is used as the probability; variance and entropy
+across the T samples are used as uncertainty features for the Q-model.
 """
 
 import sys
@@ -23,14 +23,13 @@ from collections.abc import Iterable
 from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import os
 import warnings
 warnings.filterwarnings('ignore')
 
-# ============================================================
-# Model Definition (원본과 동일)
-# ============================================================
+# ------------------------------------------------------------
+# Model definition
+# ------------------------------------------------------------
 class BasicEncoderStatic(EncoderStaticBase):
     def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
         super().__init__(hparams_encoder_static, hparams_input_shape, target_dim)
@@ -87,9 +86,9 @@ class BasicEncoderStaticMLP(BasicEncoderStatic):
         return self.output_shape
 
 
-# ============================================================
+# ------------------------------------------------------------
 # Config
-# ============================================================
+# ------------------------------------------------------------
 BATCH_SIZE     = 32
 EPOCHS         = 10
 LR             = 0.001
@@ -107,21 +106,17 @@ CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
 PNG_DIR     = os.path.join(RESULTS_DIR, "png")
 os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(PNG_DIR, exist_ok=True)
-print(f"Results → {RESULTS_DIR}")
 
 DATA_PATH = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-PT_PATH   = os.path.join(BASE_DIR, "best_mcdropout_icu24h_only_mask.pt")  # ✅ 구분
+PT_PATH   = os.path.join(BASE_DIR, "best_mcdropout_icu24h_only_mask.pt")
 
-# ============================================================
+# ------------------------------------------------------------
 # 1. Load data
-# ============================================================
-print("Loading data...")
+# ------------------------------------------------------------
 df = pd.read_csv(DATA_PATH, low_memory=False)
-print(f"shape: {df.shape}")
 
 input_cols = [c for c in df.columns if c.split("_")[0] in ['biometrics', 'demographics', 'labvalues', 'vitals']]
 
-# ✅ mask 추가
 mask_columns = []
 for c in input_cols:
     mask_col = c + '_m'
@@ -159,22 +154,19 @@ cont_features = [c for c in input_cols if c not in cat_features]
 
 df[TARGET_COL] = df[TARGET_COL].replace(-999., np.nan)
 
-print(f"categorical: {len(cat_features)}, continuous (mask 포함): {len(cont_features)}")
-
-# ============================================================
+# ------------------------------------------------------------
 # 2. Split
-# ============================================================
+# ------------------------------------------------------------
 train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True)
 val_df   = df[df['general_strat_fold'] == 18].reset_index(drop=True)
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 
 val_df  = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
-print(f"Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
 
-# ============================================================
+# ------------------------------------------------------------
 # 3. Dataset
-# ============================================================
+# ------------------------------------------------------------
 class TabularDataset(Dataset):
     def __init__(self, df, cont_f, cat_f, target_col):
         self.cont   = torch.tensor(df[cont_f].values, dtype=torch.float32)
@@ -191,9 +183,9 @@ train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_wo
 val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
-# ============================================================
+# ------------------------------------------------------------
 # 4. Model
-# ============================================================
+# ------------------------------------------------------------
 @dataclass
 class MLPConfig:
     embedding_dims: List[int] = field(default_factory=list)
@@ -219,7 +211,6 @@ mlp_cfg = MLPConfig(
 )
 
 encoder = BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1)
-print(f"Model parameters: {sum(p.numel() for p in encoder.parameters()):,}")
 
 def bce_loss_icu24h(logits, targets):
     mask = ~torch.isnan(targets.squeeze(-1))
@@ -229,12 +220,11 @@ def bce_loss_icu24h(logits, targets):
 
 optimizer = torch.optim.AdamW(encoder.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device: {device}")
 encoder   = encoder.to(device)
 
-# ============================================================
+# ------------------------------------------------------------
 # 5. Training loop
-# ============================================================
+# ------------------------------------------------------------
 best_val_auroc = 0
 best_epoch     = 0
 
@@ -265,24 +255,22 @@ for epoch in range(EPOCHS):
     mask = ~np.isnan(all_labels)
     val_auroc = roc_auc_score(all_labels[mask], all_preds[mask]) if mask.sum() > 0 else float('nan')
 
-    print(f"Epoch {epoch+1:02d}/{EPOCHS} | loss: {train_loss/len(train_loader):.4f} | "
-          f"val icu_24h AUROC: {val_auroc:.4f}")
+    print(f"epoch {epoch+1:02d}/{EPOCHS} | loss {train_loss/len(train_loader):.4f} | val AUROC {val_auroc:.4f}")
 
     if not np.isnan(val_auroc) and val_auroc > best_val_auroc:
         best_val_auroc = val_auroc
         best_epoch     = epoch + 1
         torch.save(encoder.state_dict(), PT_PATH)
 
-print(f"\nBest val icu_24h AUROC: {best_val_auroc:.4f} at epoch {best_epoch}")
-print(f"Saved: {PT_PATH}")
+print(f"best val AUROC {best_val_auroc:.4f} at epoch {best_epoch}")
 
-# ============================================================
-# 6. MC Dropout uncertainty
-# ============================================================
+# ------------------------------------------------------------
+# 6. MC Dropout inference (T stochastic forward passes)
+# ------------------------------------------------------------
 encoder.load_state_dict(torch.load(PT_PATH, map_location=device))
 
 def mc_dropout_predict(loader, model, T=50):
-    model.train()
+    model.train()  # keep dropout active during inference
     all_samples, all_labels = [], []
     with torch.no_grad():
         for cont, cat, labels in loader:
@@ -305,12 +293,8 @@ def mc_dropout_predict(loader, model, T=50):
     return mean_probs, variance, entropy, all_labels
 
 
-print(f"\nComputing MC Dropout uncertainty (T={MC_SAMPLES})...")
-print("  Val set...")
 val_prob, val_var, val_ent, val_labels = mc_dropout_predict(val_loader, encoder, MC_SAMPLES)
-print("  Test set...")
 test_prob, test_var, test_ent, test_labels = mc_dropout_predict(test_loader, encoder, MC_SAMPLES)
-print("  Done.")
 
 val_mask  = ~np.isnan(val_labels)
 test_mask = ~np.isnan(test_labels)
@@ -321,11 +305,11 @@ test_prob_icu = test_prob[test_mask]; test_var_icu = test_var[test_mask]; test_e
 test_true_icu = test_labels[test_mask].astype(int)
 
 test_auroc = roc_auc_score(test_true_icu, test_prob_icu)
-print(f"\n✅ Test AUROC (icu_24h, MC Dropout + mask): {test_auroc:.4f}")
+print(f"test AUROC (MC Dropout): {test_auroc:.4f}")
 
-# ============================================================
-# 7. Q-model feature 추출
-# ============================================================
+# ------------------------------------------------------------
+# 7. Q-model feature export
+# ------------------------------------------------------------
 def extract_qmodel_features(prob, var, ent, true_label, split_name):
     pred   = (prob >= PROB_THRESHOLD).astype(int)
     error  = (pred != true_label).astype(int)
@@ -335,9 +319,7 @@ def extract_qmodel_features(prob, var, ent, true_label, split_name):
     fn = int(((pred==0)&(true_label==1)).sum())
     tn = int(((pred==0)&(true_label==0)).sum())
     sens = tp/(tp+fn) if (tp+fn)>0 else 0
-
-    print(f"\n[{split_name}] threshold={PROB_THRESHOLD}")
-    print(f"  TP={tp}, FP={fp}, FN={fn}, TN={tn} | Sens={sens:.4f}")
+    print(f"[{split_name}] TP={tp} FP={fp} FN={fn} TN={tn} sens={sens:.4f}")
 
     out_df = pd.DataFrame({
         "prob_icu24h": prob, "variance": var, "entropy": ent,
@@ -345,14 +327,12 @@ def extract_qmodel_features(prob, var, ent, true_label, split_name):
     })
     fname = os.path.join(CSV_DIR, f"q_features_{split_name}_mcdropout_icu24h_only_mask.csv")
     out_df.to_csv(fname, index=False)
-    print(f"  Saved → {fname}")
+    print(f"Saved -> {fname}")
     return out_df
 
 val_features  = extract_qmodel_features(val_prob_icu,  val_var_icu,  val_ent_icu,  val_true_icu,  "val")
 test_features = extract_qmodel_features(test_prob_icu, test_var_icu, test_ent_icu, test_true_icu, "test")
 
-print("\n" + "="*60)
-print("✅ Done! (icu_24h single-task MC Dropout + mask)")
-print(f"  Model  : {PT_PATH}")
-print(f"  Test AUROC: {test_auroc:.4f}")
-print("="*60)
+print("MC Dropout pipeline complete.")
+print(f"model: {PT_PATH}")
+print(f"test AUROC: {test_auroc:.4f}")
