@@ -1,2 +1,0 @@
-target,auroc,auprc,brier_score,mean_uncertainty,test_n,positive_rate
-deterioration_vasopressors,0.8555242099052256,0.09875866998977686,0.008981185033917427,0.013987551,6080,0.008881578947368421
