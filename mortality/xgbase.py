@@ -1,5 +1,5 @@
 """
-XGBoost base model only (mask included) for 24h Mortality.
+XGBoost base model only (mask included) for 365d Mortality.
 Trains the base model and searches for the val-set threshold whose
 sensitivity is closest to 0.80 -- run this first, before the full
 qmodel_xgboost.py sweep, to know what PROB_THRESHOLDS range to use.
@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore')
 # Paths / config
 # ------------------------------------------------------------
 DATA_PATH    = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-TARGET_IDX   = 0  # 'deterioration_mortality_1d' is column 0 in target_columns
+TARGET_IDX   = 0  # 'deterioration_mortality_365d' is column 0 in target_columns
 RANDOM_STATE = 42
 
 XGB_BASE_PARAMS = dict(random_state=RANDOM_STATE, n_jobs=4, eval_metric='logloss')
@@ -47,10 +47,7 @@ df[all_features] = df[all_features].fillna(medians)
 all_features_with_mask = all_features + mask_columns
 
 target_columns = [
-    'deterioration_mortality_1d',
-    'deterioration_icu_24h',
-    'deterioration_cardiac_arrest',
-    'deterioration_vasopressors'
+    'deterioration_mortality_365d',
 ]
 
 # ------------------------------------------------------------
@@ -72,7 +69,7 @@ y_val   = val_df[target_columns].values
 y_test  = test_df[target_columns].values
 
 # ------------------------------------------------------------
-# 3. Train XGBoost base model (mortality_1d target only)
+# 3. Train XGBoost base model (mortality_365d target only)
 # ------------------------------------------------------------
 i = TARGET_IDX
 y_tr_raw = y_train[:, i]; y_v_raw = y_val[:, i]; y_te_raw = y_test[:, i]
@@ -108,11 +105,10 @@ print(f"Val AUROC: {auroc_val:.4f} | Test AUROC: {auroc_test:.4f}")
 # ------------------------------------------------------------
 def find_threshold_for_sensitivity(probs, labels, target_sens=0.80, thr_grid=None):
     if thr_grid is None:
-        thr_grid = np.concatenate([
-            np.arange(0.00001, 0.001, 0.00001),   # very fine near zero
-            np.arange(0.001,   0.02,  0.0005),     # finer than before
-            np.arange(0.02,    0.51,  0.01),       # coarser for the rest
-        ])
+        # even grid across the full range -- appropriate for ~13.8% positive rate
+        # (unlike mortality_1d's ~0.6% rate, the sens=0.80 threshold is expected
+        # to sit well above the near-zero region, so no need to over-sample there)
+        thr_grid = np.arange(0.001, 0.51, 0.001)
 
     best_thr, best_diff, best_sens = None, np.inf, 0
     for thr in thr_grid:

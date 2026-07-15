@@ -1,60 +1,50 @@
 """
-Q-model threshold sweep for the BasicMLP base model.
+qmodel_sweep_basicmlp_mortality365d.py — Q-model prob_threshold sweep for
+BasicMLP (365d mortality), using calibrated probabilities produced by
+cali_basicmlp_mortality365d.py (loaded from
+calibrated_probs_basicmlp_mortality365d.npz). Does NOT reload the
+pretrained encoder or rerun inference.
 
-For each prob_thr in [0.05, 0.20], the base model's prediction is compared
-against the true label to define error_label (1 = base model was wrong).
-A Q-model (LR / MLP / XGB) is trained to predict error_label from
-(base features + mask + base probability), then used to suppress alarms
-that it flags as likely incorrect, while keeping sensitivity >= 0.80.
+Q-model features = base tabular (orig+mask)
+                    + prob_mortality365d (original)
+                    + prob_mortality365d_platt     (NEW)
+                    + prob_mortality365d_isotonic  (NEW)
 
-Q-model is trained on the TRAIN split (not val) since val is too small
-relative to the feature distribution we're fitting against.
+ASSUMPTION: this script lives in the same directory as
+basicmlp_mortality365d.py / cali_basicmlp_mortality365d.py, so BASE_DIR
+resolves to the folder holding calibrated_probs_basicmlp_mortality365d.npz.
 """
 
-import sys
-sys.path.insert(0, "/fs/dss/home/gaad2403/MDS-ED/src")
+import os
+import warnings
+warnings.filterwarnings('ignore')
 
-import torch
-from torch import nn
 import numpy as np
 import pandas as pd
-import dataclasses
-from dataclasses import dataclass, field
-from typing import List
-from torch.utils.data import DataLoader, TensorDataset, Dataset
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, brier_score_loss
 from xgboost import XGBClassifier
-from collections.abc import Iterable
-import matplotlib
-matplotlib.use('Agg')
-import os
-import warnings
-warnings.filterwarnings('ignore')
 
-from clinical_ts.template_modules import EncoderStaticBase, EncoderStaticBaseConfig
-from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
-
-# ------------------------------------------------------------
-# Paths / config
-# ------------------------------------------------------------
-BASE_DIR    = "/fs/dss/home/gaad2403/MDS-ED/key/Final/modality"
+# ============================================================
+# Paths
+# ============================================================
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
-PNG_DIR     = os.path.join(RESULTS_DIR, "png")
 DATA_PATH   = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-PT_PATH     = os.path.join(BASE_DIR, "best_basicmlp_mortality1d_only.pt")
+NPZ_IN      = os.path.join(CSV_DIR, "calibrated_probs_basicmlp_mortality365d.npz")
 
 os.makedirs(CSV_DIR, exist_ok=True)
-os.makedirs(PNG_DIR, exist_ok=True)
 
-PROB_THRESHOLDS = np.round(np.arange(0.001, 0.021, 0.001), 3)
+# mortality_365d base-model thresholds observed around 0.10-0.14 (val sens=0.80),
+# so sweep a band around that instead of the near-zero band used for mortality_1d.
+PROB_THRESHOLDS = np.round(np.arange(0.05, 0.21, 0.01), 2)
 Q_THRESHOLDS    = np.round(np.arange(0.00, 1.01, 0.01), 2)
-ICU24H_IDX      = 0
-BATCH_SIZE      = 32
-LIN_FTRS        = [128, 128, 128]
 N_FOLDS         = 5
 RANDOM_STATE    = 42
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -64,88 +54,37 @@ MLP_LR          = 1e-3
 MLP_BATCH_SIZE  = 512
 MLP_DROPOUT     = 0.3
 
-# ------------------------------------------------------------
-# Base model architecture (must match training script)
-# ------------------------------------------------------------
-class BasicEncoderStatic(EncoderStaticBase):
-    def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
-        super().__init__(hparams_encoder_static, hparams_input_shape, target_dim)
-        self.input_channels_cat  = hparams_input_shape.static_dim_cat
-        self.input_channels_cont = hparams_input_shape.static_dim
-        assert(len(hparams_encoder_static.embedding_dims) == hparams_input_shape.static_dim_cat
-               and len(hparams_encoder_static.vocab_sizes) == hparams_input_shape.static_dim_cat)
-        self.embeddings = nn.ModuleList()
-        for v, e in zip(hparams_encoder_static.vocab_sizes, hparams_encoder_static.embedding_dims):
-            self.embeddings.append(nn.Embedding(v, e))
-        self.input_dim = int(np.sum(hparams_encoder_static.embedding_dims) + hparams_input_shape.static_dim)
+print(f"prob_threshold sweep: {PROB_THRESHOLDS}")
+print(f"Device: {DEVICE}")
 
-    def embed(self, **kwargs):
-        static     = kwargs.get("static", None)
-        static_cat = kwargs.get("static_cat", None)
-        res = []
-        if static_cat is not None:
-            for i, e in enumerate(self.embeddings):
-                res.append(e(static_cat[:, i].long()))
-            res = torch.cat([torch.cat(res, dim=1), static], dim=1) if static is not None else torch.cat(res, dim=1)
-        else:
-            res = static
-        return res
+# ============================================================
+# 1. Load calibrated probabilities produced by cali_basicmlp_mortality365d.py
+# ============================================================
+print(f"\nLoading calibrated probabilities from {NPZ_IN} ...")
+npz = np.load(NPZ_IN)
 
-    def forward(self, **kwargs): raise NotImplementedError
-    def get_output_shape(self):  raise NotImplementedError
+train_mask = npz["train_mask"]
+test_mask  = npz["test_mask"]
 
+train_prob_icu = npz["train_prob_icu"]
+train_true_icu = npz["train_true_icu"]
+test_prob_icu  = npz["test_prob_icu"]
+test_true_icu  = npz["test_true_icu"]
 
-class BasicEncoderStaticMLP(BasicEncoderStatic):
-    def __init__(self, hparams_encoder_static, hparams_input_shape, target_dim=None):
-        super().__init__(hparams_encoder_static, hparams_input_shape, target_dim)
-        lin_ftrs = [self.input_dim] + list(hparams_encoder_static.lin_ftrs)
-        if target_dim is not None and lin_ftrs[-1] != target_dim:
-            lin_ftrs.append(target_dim)
-        ps = [hparams_encoder_static.dropout] if not isinstance(hparams_encoder_static.dropout, Iterable) else hparams_encoder_static.dropout
-        if len(ps) == 1:
-            ps = [ps[0] / 2] * (len(lin_ftrs) - 2) + ps
-        actns  = [nn.ReLU(inplace=True)] * (len(lin_ftrs) - 2) + [None]
-        layers = []
-        for ni, no, p, actn in zip(lin_ftrs[:-1], lin_ftrs[1:], ps, actns):
-            layers += bn_drop_lin(ni, no, hparams_encoder_static.batch_norm, p, actn, layer_norm=False)
-        self.layers = nn.Sequential(*layers)
-        self.output_shape = dataclasses.replace(hparams_input_shape)
-        self.output_shape.static_dim     = int(lin_ftrs[-1])
-        self.output_shape.static_dim_cat = 0
+train_prob_icu_platt = npz["train_prob_icu_platt"]
+test_prob_icu_platt  = npz["test_prob_icu_platt"]
+train_prob_icu_iso   = npz["train_prob_icu_iso"]
+test_prob_icu_iso    = npz["test_prob_icu_iso"]
 
-    def forward(self, **kwargs):
-        return {"static": self.layers(self.embed(**kwargs))}
+print(f"Train mortality365d samples: {len(train_prob_icu)}")
+print(f"Test  mortality365d samples: {len(test_prob_icu)}")
 
-    def get_output_shape(self):
-        return self.output_shape
-
-
-@dataclass
-class BasicEncoderStaticConfig(EncoderStaticBaseConfig):
-    _target_: str = "clinical_ts.tabular.base.BasicEncoderStatic"
-    embedding_dims: List[int] = field(default_factory=list)
-    vocab_sizes: List[int]    = field(default_factory=list)
-
-@dataclass
-class MLPConfig:
-    embedding_dims: List[int] = field(default_factory=list)
-    vocab_sizes: List[int]    = field(default_factory=list)
-    lin_ftrs: List[int]       = field(default_factory=lambda: [128, 128, 128])
-    dropout: float   = 0.5
-    batch_norm: bool = True
-
-@dataclass
-class ShapeCfg:
-    static_dim: int     = 0
-    static_dim_cat: int = 0
-    channels: int       = 0
-    length: int         = 0
-    sequence_last: bool = False
-    channels2: int      = 0
-
-# ------------------------------------------------------------
-# 1. Load & preprocess data (mask included, same as base model)
-# ------------------------------------------------------------
+# ============================================================
+# 2. Rebuild train_df / test_df with the SAME preprocessing as
+#    cali_basicmlp_mortality365d.py (feature reconstruction only —
+#    no model loading or inference happens here)
+# ============================================================
+print("\nLoading data (features only, no model)...")
 df = pd.read_csv(DATA_PATH, low_memory=False)
 
 input_cols = [c for c in df.columns if c.split("_")[0] in ['biometrics','demographics','labvalues','vitals']]
@@ -183,78 +122,22 @@ input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics','demo
 cat_features  = [c for c in input_cols if c in cat_features]
 cont_features = [c for c in input_cols if c not in cat_features]
 
-lbl_itos = ["mortality_1d"]
+lbl_itos = ["mortality_365d"]
 for c in lbl_itos:
     df["deterioration_" + c] = df["deterioration_" + c].replace(-999., np.nan)
 
 train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True)
-val_df   = df[df['general_strat_fold'] == 18].reset_index(drop=True)
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
-val_df   = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df  = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 
-# ------------------------------------------------------------
-# 2. Dataset / DataLoader
-# ------------------------------------------------------------
-class TabularDataset(Dataset):
-    def __init__(self, df, cont_f, cat_f, lbl_cols):
-        self.cont   = torch.tensor(df[cont_f].values, dtype=torch.float32)
-        self.cat    = torch.tensor(df[cat_f].values,  dtype=torch.long)
-        self.labels = torch.tensor(df[["deterioration_"+c for c in lbl_cols]].values, dtype=torch.float32)
-    def __len__(self): return len(self.cont)
-    def __getitem__(self, i): return self.cont[i], self.cat[i], self.labels[i]
+# Sanity check: masks from cali_basicmlp_mortality365d.py must match this df's row counts exactly.
+assert len(train_mask) == len(train_df), \
+    f"train_mask length ({len(train_mask)}) != train_df length ({len(train_df)}) — " \
+    f"cali_basicmlp_mortality365d.py and qmodel_sweep_basicmlp_mortality365d.py preprocessing have diverged, do not proceed."
+assert len(test_mask) == len(test_df), \
+    f"test_mask length ({len(test_mask)}) != test_df length ({len(test_df)}) — " \
+    f"cali_basicmlp_mortality365d.py and qmodel_sweep_basicmlp_mortality365d.py preprocessing have diverged, do not proceed."
 
-train_loader = DataLoader(TabularDataset(train_df, cont_features, cat_features, lbl_itos),
-                          batch_size=BATCH_SIZE, shuffle=False)
-val_loader   = DataLoader(TabularDataset(val_df,  cont_features, cat_features, lbl_itos),
-                          batch_size=BATCH_SIZE, shuffle=False)
-test_loader  = DataLoader(TabularDataset(test_df, cont_features, cat_features, lbl_itos),
-                          batch_size=BATCH_SIZE, shuffle=False)
-
-# ------------------------------------------------------------
-# 3. Load pretrained base model, run inference
-# ------------------------------------------------------------
-shape   = ShapeCfg(static_dim=len(cont_features), static_dim_cat=len(cat_features))
-mlp_cfg = MLPConfig(
-    embedding_dims=[unique_counts[c] for c in cat_features],
-    vocab_sizes=[unique_counts[c] for c in cat_features],
-    lin_ftrs=LIN_FTRS
-)
-encoder = BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1).to(DEVICE)
-encoder.load_state_dict(torch.load(PT_PATH, map_location=DEVICE))
-encoder.eval()
-
-def get_probs_labels(loader):
-    all_probs, all_labels = [], []
-    with torch.no_grad():
-        for cont, cat, labels in loader:
-            cont, cat = cont.to(DEVICE), cat.to(DEVICE)
-            probs = torch.sigmoid(encoder(static=cont, static_cat=cat)["static"])
-            all_probs.append(probs.cpu().numpy())
-            all_labels.append(labels.numpy())
-    return np.concatenate(all_probs, 0), np.concatenate(all_labels, 0)
-
-train_probs, train_labels = get_probs_labels(train_loader)
-val_probs,   val_labels   = get_probs_labels(val_loader)
-test_probs,  test_labels  = get_probs_labels(test_loader)
-
-def split_icu(probs, labels):
-    p = probs[:, ICU24H_IDX]
-    t = labels[:, ICU24H_IDX]
-    m = ~np.isnan(t)
-    return p[m], t[m].astype(int)
-
-train_prob_icu, train_true_icu = split_icu(train_probs, train_labels)
-val_prob_icu,   val_true_icu   = split_icu(val_probs,   val_labels)
-test_prob_icu,  test_true_icu  = split_icu(test_probs,  test_labels)
-
-train_mask = ~np.isnan(train_labels[:, ICU24H_IDX])
-test_mask  = ~np.isnan(test_labels[:, ICU24H_IDX])
-
-# ------------------------------------------------------------
-# 4. Build Q-model input features: base features + base probability
-#    (Q-model is trained on the TRAIN split)
-# ------------------------------------------------------------
 train_df_masked = train_df[train_mask].reset_index(drop=True)
 test_df_masked  = test_df[test_mask].reset_index(drop=True)
 
@@ -267,11 +150,16 @@ X_test_features = np.hstack([
     test_df_masked[cat_features].values.astype(np.float32)
 ])
 
-feature_names_qmodel = cont_features + cat_features + ["base_model_prob_mortality1d"]
+feature_names_qmodel = cont_features + cat_features + [
+    "base_model_prob_mortality365d",
+    "base_model_prob_mortality365d_platt",
+    "base_model_prob_mortality365d_isotonic",
+]
+print(f"Q-model feature count: {len(feature_names_qmodel)}")
 
-# ------------------------------------------------------------
-# 5. Q-model helpers
-# ------------------------------------------------------------
+# ============================================================
+# 3. Q-model helpers
+# ============================================================
 class QModelMLP(nn.Module):
     def __init__(self, input_dim, hidden_dims, dropout=0.3):
         super().__init__()
@@ -302,7 +190,6 @@ def train_mlp(X_tr, y_tr, X_eval):
 
 
 def fit_predict(model_type, X_tr, y_tr, X_eval):
-    """Fit a Q-model (LR/MLP/XGB) on (X_tr, y_tr) and predict on X_eval."""
     if model_type == "LR":
         scaler   = StandardScaler()
         X_tr_s   = scaler.fit_transform(X_tr)
@@ -321,39 +208,36 @@ def fit_predict(model_type, X_tr, y_tr, X_eval):
         return m.predict_proba(X_eval)[:, 1]
 
 
-def get_qprobs(X_train_feat, y_train, X_test_feat, train_prob_icu, test_prob_icu,
+def get_qprobs(X_tr_feat, y_tr, X_te_feat, tr_prob, te_prob,
+               tr_prob_platt, te_prob_platt, tr_prob_iso, te_prob_iso,
                model_type, verbose_label=""):
-    """
-    Train the Q-model two ways and return both:
-      - simple:   fit once on the full train set, predict on test
-      - cf (CrossFit): 5-fold split, each fold's model predicts on test,
-                        final test prediction is the average across folds
-                        (reduces overfitting / leakage risk)
-    """
-    X_train_q = np.hstack([X_train_feat, train_prob_icu.reshape(-1, 1)]).astype(np.float32)
-    X_test_q  = np.hstack([X_test_feat,  test_prob_icu.reshape(-1, 1)]).astype(np.float32)
 
-    simple = fit_predict(model_type, X_train_q, y_train, X_test_q)
+    X_tr_q = np.hstack([
+        X_tr_feat, tr_prob.reshape(-1, 1),
+        tr_prob_platt.reshape(-1, 1), tr_prob_iso.reshape(-1, 1),
+    ]).astype(np.float32)
+
+    X_te_q = np.hstack([
+        X_te_feat, te_prob.reshape(-1, 1),
+        te_prob_platt.reshape(-1, 1), te_prob_iso.reshape(-1, 1),
+    ]).astype(np.float32)
+
+    simple = fit_predict(model_type, X_tr_q, y_tr, X_te_q)
 
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     test_fold_preds = []
-    for tri, _ in skf.split(X_train_q, y_train):
-        X_tr, y_tr = X_train_q[tri], y_train[tri]
-        test_fold_preds.append(fit_predict(model_type, X_tr, y_tr, X_test_q))
+    for tri, _ in skf.split(X_tr_q, y_tr):
+        Xt, yt = X_tr_q[tri], y_tr[tri]
+        test_fold_preds.append(fit_predict(model_type, Xt, yt, X_te_q))
     cf = np.mean(test_fold_preds, axis=0)
 
-    if len(np.unique(y_train)) > 1:
+    if len(np.unique(y_tr)) > 1:
         print(f"  [{model_type}{verbose_label}] fit done")
 
     return simple, cf
 
 
 def best_operating_point(q_probs, pred_base, true_label, fp_base):
-    """
-    Sweep q_thr in [0, 1]. At each threshold, suppress alarms with
-    q_prob >= q_thr, then return the point with max FP reduction
-    subject to sensitivity >= 0.80.
-    """
     best_row = None
     for q_thr in Q_THRESHOLDS:
         pred_new = pred_base.copy()
@@ -387,9 +271,9 @@ def full_sweep(q_probs, pred_base, true_label, fp_base):
         rows.append(dict(q_thr=q_thr, sensitivity=sens, FP_reduction_pct=fpr))
     return pd.DataFrame(rows)
 
-# ------------------------------------------------------------
-# 6. Main sweep: for every prob_thr, train Q-model and find best q_thr
-# ------------------------------------------------------------
+# ============================================================
+# 4. Main sweep loop
+# ============================================================
 summary_rows = []
 sweep_data   = {}
 
@@ -398,7 +282,7 @@ for prob_thr in PROB_THRESHOLDS:
 
     train_pred = (train_prob_icu >= prob_thr).astype(int)
     test_pred  = (test_prob_icu  >= prob_thr).astype(int)
-    train_err  = (train_pred != train_true_icu).astype(int)  # Q-model target
+    train_err  = (train_pred != train_true_icu).astype(int)
     test_err   = (test_pred  != test_true_icu).astype(int)
 
     tp_b = int(((test_pred==1)&(test_true_icu==1)).sum())
@@ -417,9 +301,13 @@ for prob_thr in PROB_THRESHOLDS:
     ))
 
     for mtype in ["LR", "MLP", "XGB"]:
-        q_simple, q_cf = get_qprobs(X_train_features, train_err, X_test_features,
-                                    train_prob_icu, test_prob_icu,
-                                    mtype, verbose_label=f" @thr={prob_thr:.2f}")
+        q_simple, q_cf = get_qprobs(
+            X_train_features, train_err, X_test_features,
+            train_prob_icu, test_prob_icu,
+            train_prob_icu_platt, test_prob_icu_platt,
+            train_prob_icu_iso, test_prob_icu_iso,
+            mtype, verbose_label=f" @thr={prob_thr:.2f}"
+        )
 
         for strategy, q_probs in [("Simple", q_simple), ("CrossFit", q_cf)]:
             auroc = roc_auc_score(test_err, q_probs) if len(np.unique(test_err))>1 else float('nan')
@@ -448,10 +336,10 @@ for prob_thr in PROB_THRESHOLDS:
                     AUROC=round(auroc,4), Brier=round(brier,4)
                 ))
 
-# ------------------------------------------------------------
-# 7. Save summary
-# ------------------------------------------------------------
+# ============================================================
+# 5. Save summary
+# ============================================================
 summary_df = pd.DataFrame(summary_rows)
-summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_mortality1d_only_mask_trainQ.csv")
+summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_basicmlp_mortality365d_only_mask_trainQ_WITH_CALIBRATION.csv")
 summary_df.to_csv(summary_path, index=False)
 print(f"Summary saved: {summary_path}")

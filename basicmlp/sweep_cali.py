@@ -1,16 +1,7 @@
 """
-qmodel_sweep_mc_mortality365d.py — Q-model prob_threshold sweep for
-MC Dropout (365d mortality), using calibrated probabilities produced
-by cali_mc_mortality365d.py (loaded from
-calibrated_probs_mc_mortality365d.npz). Does NOT reload the pretrained
-model or rerun MC sampling.
-
-Q-model features = base tabular (orig+mask)
-                    + prob_mortality365d (original)
-                    + prob_mortality365d_platt        (NEW)
-                    + prob_mortality365d_isotonic     (NEW)
-                    + variance   (unchanged, not calibrated)
-                    + entropy    (unchanged, not calibrated)
+qmodel_sweep.py — Q-model prob_threshold sweep, using calibrated
+probabilities produced by cali.py (loaded from calibrated_probs.npz).
+Does NOT reload the pretrained encoder or rerun inference.
 """
 
 import os
@@ -31,16 +22,13 @@ from xgboost import XGBClassifier
 # ============================================================
 # Paths
 # ============================================================
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR    = "/fs/dss/home/gaad2403/MDS-ED/key/Final/basicMLP"
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
 DATA_PATH   = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-NPZ_IN      = os.path.join(CSV_DIR, "calibrated_probs_mc_mortality365d.npz")
+NPZ_IN      = os.path.join(CSV_DIR, "calibrated_probs.npz")
 
-os.makedirs(CSV_DIR, exist_ok=True)
-
-# mortality_365d MC Dropout threshold observed ~0.132 (val sens=0.80)
-PROB_THRESHOLDS = np.round(np.arange(0.05, 0.21, 0.01), 2)
+PROB_THRESHOLDS = np.round(np.arange(0.00, 0.21, 0.01), 2)
 Q_THRESHOLDS    = np.round(np.arange(0.00, 1.01, 0.01), 2)
 N_FOLDS         = 5
 RANDOM_STATE    = 42
@@ -48,14 +36,14 @@ DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MLP_HIDDEN      = [64, 32]
 MLP_EPOCHS      = 50
 MLP_LR          = 1e-3
-MLP_BATCH_SIZE  = 64
+MLP_BATCH_SIZE  = 512
 MLP_DROPOUT     = 0.3
 
 print(f"prob_threshold sweep: {PROB_THRESHOLDS}")
 print(f"Device: {DEVICE}")
 
 # ============================================================
-# 1. Load calibrated probabilities + MC stats from cali_mc_mortality365d.py
+# 1. Load calibrated probabilities produced by cali.py
 # ============================================================
 print(f"\nLoading calibrated probabilities from {NPZ_IN} ...")
 npz = np.load(NPZ_IN)
@@ -64,27 +52,22 @@ train_mask = npz["train_mask"]
 test_mask  = npz["test_mask"]
 
 train_prob_icu = npz["train_prob_icu"]
-train_var_icu  = npz["train_var_icu"]
-train_ent_icu  = npz["train_ent_icu"]
 train_true_icu = npz["train_true_icu"]
-
-test_prob_icu = npz["test_prob_icu"]
-test_var_icu  = npz["test_var_icu"]
-test_ent_icu  = npz["test_ent_icu"]
-test_true_icu = npz["test_true_icu"]
+test_prob_icu  = npz["test_prob_icu"]
+test_true_icu  = npz["test_true_icu"]
 
 train_prob_icu_platt = npz["train_prob_icu_platt"]
 test_prob_icu_platt  = npz["test_prob_icu_platt"]
 train_prob_icu_iso   = npz["train_prob_icu_iso"]
 test_prob_icu_iso    = npz["test_prob_icu_iso"]
 
-print(f"Train mortality365d samples: {len(train_prob_icu)}")
-print(f"Test  mortality365d samples: {len(test_prob_icu)}")
+print(f"Train ICU samples: {len(train_prob_icu)}")
+print(f"Test  ICU samples: {len(test_prob_icu)}")
 
 # ============================================================
-# 2. Rebuild train_df / test_df with the SAME preprocessing as
-#    cali_mc_mortality365d.py (feature reconstruction only — no
-#    model loading or MC sampling)
+# 2. Rebuild train_df / test_df with the SAME preprocessing as cali.py
+#    (needed only to reconstruct the tabular base features — no model
+#    loading or inference happens here)
 # ============================================================
 print("\nLoading data (features only, no model)...")
 df = pd.read_csv(DATA_PATH, low_memory=False)
@@ -124,7 +107,7 @@ input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics','demo
 cat_features  = [c for c in input_cols if c in cat_features]
 cont_features = [c for c in input_cols if c not in cat_features]
 
-lbl_itos = ["mortality_365d"]
+lbl_itos = ["icu_24h"]
 for c in lbl_itos:
     df["deterioration_" + c] = df["deterioration_" + c].replace(-999., np.nan)
 
@@ -132,13 +115,13 @@ train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 test_df  = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 
-# Sanity check: masks from cali_mc_mortality365d.py must match this df's row counts exactly.
+# Sanity check: masks from cali.py must match this df's row counts exactly.
 assert len(train_mask) == len(train_df), \
     f"train_mask length ({len(train_mask)}) != train_df length ({len(train_df)}) — " \
-    f"cali_mc_mortality365d.py and qmodel_sweep_mc_mortality365d.py preprocessing have diverged, do not proceed."
+    f"cali.py and qmodel_sweep.py preprocessing have diverged, do not proceed."
 assert len(test_mask) == len(test_df), \
     f"test_mask length ({len(test_mask)}) != test_df length ({len(test_df)}) — " \
-    f"cali_mc_mortality365d.py and qmodel_sweep_mc_mortality365d.py preprocessing have diverged, do not proceed."
+    f"cali.py and qmodel_sweep.py preprocessing have diverged, do not proceed."
 
 train_df_masked = train_df[train_mask].reset_index(drop=True)
 test_df_masked  = test_df[test_mask].reset_index(drop=True)
@@ -153,8 +136,9 @@ X_test_features = np.hstack([
 ])
 
 feature_names_qmodel = cont_features + cat_features + [
-    "prob_mortality365d", "prob_mortality365d_platt", "prob_mortality365d_isotonic",
-    "variance", "entropy",
+    "base_model_prob_icu24h",
+    "base_model_prob_icu24h_platt",
+    "base_model_prob_icu24h_isotonic",
 ]
 print(f"Q-model feature count: {len(feature_names_qmodel)}")
 
@@ -209,21 +193,18 @@ def fit_predict(model_type, X_tr, y_tr, X_eval):
         return m.predict_proba(X_eval)[:, 1]
 
 
-def get_qprobs(X_tr_feat, y_tr, X_te_feat,
-               tr_prob, tr_prob_platt, tr_prob_iso, tr_var, tr_ent,
-               te_prob, te_prob_platt, te_prob_iso, te_var, te_ent,
+def get_qprobs(X_tr_feat, y_tr, X_te_feat, tr_prob, te_prob,
+               tr_prob_platt, te_prob_platt, tr_prob_iso, te_prob_iso,
                model_type, verbose_label=""):
 
     X_tr_q = np.hstack([
-        X_tr_feat,
-        tr_prob.reshape(-1, 1), tr_prob_platt.reshape(-1, 1), tr_prob_iso.reshape(-1, 1),
-        tr_var.reshape(-1, 1), tr_ent.reshape(-1, 1),
+        X_tr_feat, tr_prob.reshape(-1, 1),
+        tr_prob_platt.reshape(-1, 1), tr_prob_iso.reshape(-1, 1),
     ]).astype(np.float32)
 
     X_te_q = np.hstack([
-        X_te_feat,
-        te_prob.reshape(-1, 1), te_prob_platt.reshape(-1, 1), te_prob_iso.reshape(-1, 1),
-        te_var.reshape(-1, 1), te_ent.reshape(-1, 1),
+        X_te_feat, te_prob.reshape(-1, 1),
+        te_prob_platt.reshape(-1, 1), te_prob_iso.reshape(-1, 1),
     ]).astype(np.float32)
 
     simple = fit_predict(model_type, X_tr_q, y_tr, X_te_q)
@@ -235,7 +216,9 @@ def get_qprobs(X_tr_feat, y_tr, X_te_feat,
         test_fold_preds.append(fit_predict(model_type, Xt, yt, X_te_q))
     cf = np.mean(test_fold_preds, axis=0)
 
-    print(f"    [{model_type}{verbose_label}] fit done")
+    if len(np.unique(y_tr)) > 1:
+        print(f"  [{model_type}{verbose_label}] fit done")
+
     return simple, cf
 
 
@@ -259,17 +242,28 @@ def best_operating_point(q_probs, pred_base, true_label, fp_base):
                                 FP_reduction_pct=round(fpr,2))
     return best_row
 
+
+def full_sweep(q_probs, pred_base, true_label, fp_base):
+    rows = []
+    for q_thr in Q_THRESHOLDS:
+        pred_new = pred_base.copy()
+        pred_new[q_probs >= q_thr] = 0
+        tp = int(((pred_new==1)&(true_label==1)).sum())
+        fp = int(((pred_new==1)&(true_label==0)).sum())
+        fn = int(((pred_new==0)&(true_label==1)).sum())
+        sens = tp/(tp+fn) if (tp+fn)>0 else 0
+        fpr  = (fp_base-fp)/fp_base*100 if fp_base>0 else 0
+        rows.append(dict(q_thr=q_thr, sensitivity=sens, FP_reduction_pct=fpr))
+    return pd.DataFrame(rows)
+
 # ============================================================
 # 4. Main sweep loop
 # ============================================================
 summary_rows = []
-
-print(f"\n{'='*60}")
-print(f"Starting prob_threshold sweep: {PROB_THRESHOLDS}")
-print(f"{'='*60}")
+sweep_data   = {}
 
 for prob_thr in PROB_THRESHOLDS:
-    print(f"\n>>> prob_threshold = {prob_thr:.2f}")
+    print(f">>> prob_thr = {prob_thr:.2f}")
 
     train_pred = (train_prob_icu >= prob_thr).astype(int)
     test_pred  = (test_prob_icu  >= prob_thr).astype(int)
@@ -282,22 +276,21 @@ for prob_thr in PROB_THRESHOLDS:
     tn_b = int(((test_pred==0)&(test_true_icu==0)).sum())
     sens_b = tp_b/(tp_b+fn_b) if (tp_b+fn_b)>0 else 0
 
-    print(f"  Baseline(test): TP={tp_b} FP={fp_b} FN={fn_b} TN={tn_b} | Sens={sens_b:.4f}")
-
     summary_rows.append(dict(
         prob_thr=prob_thr, strategy="Baseline", model="-",
-        base_sensitivity=round(sens_b,4), best_q_thr="-", sensitivity=round(sens_b,4),
-        FP_reduction_pct=0.0, TP=tp_b, FP=fp_b, FN=fn_b, TN=tn_b,
+        base_sensitivity=round(sens_b,4),
+        best_q_thr="-", sensitivity=round(sens_b,4),
+        FP_reduction_pct=0.0,
+        TP=tp_b, FP=fp_b, FN=fn_b, TN=tn_b,
         AUROC="-", Brier="-"
     ))
 
     for mtype in ["LR", "MLP", "XGB"]:
         q_simple, q_cf = get_qprobs(
             X_train_features, train_err, X_test_features,
-            train_prob_icu, train_prob_icu_platt, train_prob_icu_iso,
-            train_var_icu, train_ent_icu,
-            test_prob_icu, test_prob_icu_platt, test_prob_icu_iso,
-            test_var_icu, test_ent_icu,
+            train_prob_icu, test_prob_icu,
+            train_prob_icu_platt, test_prob_icu_platt,
+            train_prob_icu_iso, test_prob_icu_iso,
             mtype, verbose_label=f" @thr={prob_thr:.2f}"
         )
 
@@ -306,6 +299,7 @@ for prob_thr in PROB_THRESHOLDS:
             brier = brier_score_loss(test_err, q_probs)
 
             best = best_operating_point(q_probs, test_pred, test_true_icu, fp_b)
+            sweep_data[(prob_thr, mtype, strategy)] = full_sweep(q_probs, test_pred, test_true_icu, fp_b)
 
             if best:
                 summary_rows.append(dict(
@@ -326,13 +320,11 @@ for prob_thr in PROB_THRESHOLDS:
                     TP="-", FP="-", FN="-", TN="-",
                     AUROC=round(auroc,4), Brier=round(brier,4)
                 ))
-        print(f"  {mtype} done")
 
 # ============================================================
 # 5. Save summary
 # ============================================================
 summary_df = pd.DataFrame(summary_rows)
-summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_mcdropout_mortality365d_only_mask_trainQ_WITH_CALIBRATION.csv")
+summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_icu24h_only_mask_trainQ_WITH_CALIBRATION.csv")
 summary_df.to_csv(summary_path, index=False)
-print(f"\nSummary saved: {summary_path}")
-print(summary_df.to_string(index=False))
+print(f"Summary saved: {summary_path}")

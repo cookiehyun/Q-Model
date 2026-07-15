@@ -1,14 +1,13 @@
 """
-qmodel_sweep_mc_mortality365d.py — Q-model prob_threshold sweep for
-MC Dropout (365d mortality), using calibrated probabilities produced
-by cali_mc_mortality365d.py (loaded from
-calibrated_probs_mc_mortality365d.npz). Does NOT reload the pretrained
+qmodel_sweep_mc.py — Q-model prob_threshold sweep for MC Dropout,
+using calibrated probabilities produced by cali_mc.py
+(loaded from calibrated_probs_mc.npz). Does NOT reload the pretrained
 model or rerun MC sampling.
 
 Q-model features = base tabular (orig+mask)
-                    + prob_mortality365d (original)
-                    + prob_mortality365d_platt        (NEW)
-                    + prob_mortality365d_isotonic     (NEW)
+                    + prob_icu24h (original)
+                    + prob_icu24h_platt        (NEW)
+                    + prob_icu24h_isotonic     (NEW)
                     + variance   (unchanged, not calibrated)
                     + entropy    (unchanged, not calibrated)
 """
@@ -31,15 +30,14 @@ from xgboost import XGBClassifier
 # ============================================================
 # Paths
 # ============================================================
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR    = "/user/gaad2403/MDS-ED/key/Final/MCdropout"
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
 DATA_PATH   = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-NPZ_IN      = os.path.join(CSV_DIR, "calibrated_probs_mc_mortality365d.npz")
+NPZ_IN      = os.path.join(CSV_DIR, "calibrated_probs_mc.npz")
 
 os.makedirs(CSV_DIR, exist_ok=True)
 
-# mortality_365d MC Dropout threshold observed ~0.132 (val sens=0.80)
 PROB_THRESHOLDS = np.round(np.arange(0.05, 0.21, 0.01), 2)
 Q_THRESHOLDS    = np.round(np.arange(0.00, 1.01, 0.01), 2)
 N_FOLDS         = 5
@@ -55,7 +53,7 @@ print(f"prob_threshold sweep: {PROB_THRESHOLDS}")
 print(f"Device: {DEVICE}")
 
 # ============================================================
-# 1. Load calibrated probabilities + MC stats from cali_mc_mortality365d.py
+# 1. Load calibrated probabilities + MC stats from cali_mc.py
 # ============================================================
 print(f"\nLoading calibrated probabilities from {NPZ_IN} ...")
 npz = np.load(NPZ_IN)
@@ -78,13 +76,12 @@ test_prob_icu_platt  = npz["test_prob_icu_platt"]
 train_prob_icu_iso   = npz["train_prob_icu_iso"]
 test_prob_icu_iso    = npz["test_prob_icu_iso"]
 
-print(f"Train mortality365d samples: {len(train_prob_icu)}")
-print(f"Test  mortality365d samples: {len(test_prob_icu)}")
+print(f"Train ICU samples: {len(train_prob_icu)}")
+print(f"Test  ICU samples: {len(test_prob_icu)}")
 
 # ============================================================
-# 2. Rebuild train_df / test_df with the SAME preprocessing as
-#    cali_mc_mortality365d.py (feature reconstruction only — no
-#    model loading or MC sampling)
+# 2. Rebuild train_df / test_df with the SAME preprocessing as cali_mc.py
+#    (feature reconstruction only — no model loading or MC sampling)
 # ============================================================
 print("\nLoading data (features only, no model)...")
 df = pd.read_csv(DATA_PATH, low_memory=False)
@@ -124,7 +121,7 @@ input_cols    = [c for c in df.columns if c.split("_")[0] in ['biometrics','demo
 cat_features  = [c for c in input_cols if c in cat_features]
 cont_features = [c for c in input_cols if c not in cat_features]
 
-lbl_itos = ["mortality_365d"]
+lbl_itos = ["icu_24h"]
 for c in lbl_itos:
     df["deterioration_" + c] = df["deterioration_" + c].replace(-999., np.nan)
 
@@ -132,13 +129,13 @@ train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
 test_df  = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 
-# Sanity check: masks from cali_mc_mortality365d.py must match this df's row counts exactly.
+# Sanity check: masks from cali_mc.py must match this df's row counts exactly.
 assert len(train_mask) == len(train_df), \
     f"train_mask length ({len(train_mask)}) != train_df length ({len(train_df)}) — " \
-    f"cali_mc_mortality365d.py and qmodel_sweep_mc_mortality365d.py preprocessing have diverged, do not proceed."
+    f"cali_mc.py and qmodel_sweep_mc.py preprocessing have diverged, do not proceed."
 assert len(test_mask) == len(test_df), \
     f"test_mask length ({len(test_mask)}) != test_df length ({len(test_df)}) — " \
-    f"cali_mc_mortality365d.py and qmodel_sweep_mc_mortality365d.py preprocessing have diverged, do not proceed."
+    f"cali_mc.py and qmodel_sweep_mc.py preprocessing have diverged, do not proceed."
 
 train_df_masked = train_df[train_mask].reset_index(drop=True)
 test_df_masked  = test_df[test_mask].reset_index(drop=True)
@@ -153,7 +150,7 @@ X_test_features = np.hstack([
 ])
 
 feature_names_qmodel = cont_features + cat_features + [
-    "prob_mortality365d", "prob_mortality365d_platt", "prob_mortality365d_isotonic",
+    "prob_icu24h", "prob_icu24h_platt", "prob_icu24h_isotonic",
     "variance", "entropy",
 ]
 print(f"Q-model feature count: {len(feature_names_qmodel)}")
@@ -332,7 +329,7 @@ for prob_thr in PROB_THRESHOLDS:
 # 5. Save summary
 # ============================================================
 summary_df = pd.DataFrame(summary_rows)
-summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_mcdropout_mortality365d_only_mask_trainQ_WITH_CALIBRATION.csv")
+summary_path = os.path.join(CSV_DIR, "prob_thr_sweep_summary_mcdropout_icu24h_only_mask_trainQ_WITH_CALIBRATION.csv")
 summary_df.to_csv(summary_path, index=False)
 print(f"\nSummary saved: {summary_path}")
 print(summary_df.to_string(index=False))

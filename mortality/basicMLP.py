@@ -1,5 +1,5 @@
 """
-BasicMLP base model for 24h Mortality deterioration prediction.
+BasicMLP base model for 365d Mortality deterioration prediction.
 Trains a static (tabular) MLP encoder on demographics/vitals/labs/biometrics,
 then extracts probability outputs used later as Q-model input features.
 """
@@ -111,7 +111,7 @@ LR           = 0.001
 WEIGHT_DECAY = 0.001
 DROPOUT      = 0.5
 LIN_FTRS     = [128, 128, 128]
-TARGET_TASK  = "mortality_1d"
+TARGET_TASK  = "mortality_365d"
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
@@ -241,7 +241,7 @@ encoder = BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1)
 # ------------------------------------------------------------
 # 5. Loss & optimizer
 # ------------------------------------------------------------
-def mortality1d_loss(preds, targets):
+def mortality365d_loss(preds, targets):
     mask = ~torch.isnan(targets)
     if mask.sum() == 0:
         return torch.tensor(0.0, requires_grad=True)
@@ -254,7 +254,7 @@ encoder   = encoder.to(device)
 # ------------------------------------------------------------
 # 6. Training loop (checkpoint on best val AUROC)
 # ------------------------------------------------------------
-best_val_auroc_mortality1d = 0
+best_val_auroc_mortality365d = 0
 best_epoch            = 0
 
 for epoch in range(EPOCHS):
@@ -265,7 +265,7 @@ for epoch in range(EPOCHS):
         optimizer.zero_grad()
         out    = encoder(static=cont, static_cat=cat)
         logits = out["static"]
-        loss   = mortality1d_loss(logits, labels)
+        loss   = mortality365d_loss(logits, labels)
         loss.backward()
         optimizer.step()
         train_loss += loss.item()
@@ -285,31 +285,31 @@ for epoch in range(EPOCHS):
 
     mask = ~np.isnan(all_labels[:, 0])
     if mask.sum() > 0 and len(np.unique(all_labels[mask, 0])) > 1:
-        val_auroc_mortality1d = roc_auc_score(all_labels[mask, 0], all_preds[mask, 0])
+        val_auroc_mortality365d = roc_auc_score(all_labels[mask, 0], all_preds[mask, 0])
     else:
-        val_auroc_mortality1d = float('nan')
+        val_auroc_mortality365d = float('nan')
 
     print(f"Epoch {epoch+1:02d}/{EPOCHS} | loss: {train_loss/len(train_loader):.4f} | "
-          f"val AUROC: {val_auroc_mortality1d:.4f}")
+          f"val AUROC: {val_auroc_mortality365d:.4f}")
 
-    if not np.isnan(val_auroc_mortality1d) and val_auroc_mortality1d > best_val_auroc_mortality1d:
-        best_val_auroc_mortality1d = val_auroc_mortality1d
+    if not np.isnan(val_auroc_mortality365d) and val_auroc_mortality365d > best_val_auroc_mortality365d:
+        best_val_auroc_mortality365d = val_auroc_mortality365d
         best_epoch            = epoch + 1
-        torch.save(encoder.state_dict(), os.path.join(BASE_DIR, 'best_basicmlp_mortality1d_only.pt'))
+        torch.save(encoder.state_dict(), os.path.join(BASE_DIR, 'best_basicmlp_mortality365d_only.pt'))
 
-print(f"Best val AUROC: {best_val_auroc_mortality1d:.4f} at epoch {best_epoch}")
+print(f"Best val AUROC: {best_val_auroc_mortality365d:.4f} at epoch {best_epoch}")
 
 # ------------------------------------------------------------
 # 7. Inference + Q-model feature export
 # ------------------------------------------------------------
-encoder.load_state_dict(torch.load(os.path.join(BASE_DIR, 'best_basicmlp_mortality1d_only.pt'), map_location=device))
+encoder.load_state_dict(torch.load(os.path.join(BASE_DIR, 'best_basicmlp_mortality365d_only.pt'), map_location=device))
 encoder.eval()
 
 def find_threshold_for_sensitivity(probs, labels, target_sens=0.80, thr_grid=None):
     """Scan thresholds on val set and return the one whose sensitivity
     is closest to target_sens (searching from strict to loose)."""
     if thr_grid is None:
-        thr_grid = np.arange(0.001, 0.51, 0.001)  # fine grid, low range for rare events
+        thr_grid = np.arange(0.001, 0.51, 0.001)  # even grid, works well for ~13.8% positive rate
 
     valid_mask = ~np.isnan(labels)
     probs  = probs[valid_mask]
@@ -379,13 +379,13 @@ def extract_qmodel_features(loader, df_ref, split_name):
     print(f"[{split_name}] thr={PROB_THRESHOLD} TP={tp} FP={fp} FN={fn} TN={tn} sens={sensitivity:.4f}")
 
     out_df = pd.DataFrame({
-        "prob_mortality1d":  prob_icu,
+        "prob_mortality365d":  prob_icu,
         "true_label":   true_icu_int,
         "pred_label":   pred_icu,
         "error_label":  error_label,
     })
 
-    fname = os.path.join(CSV_DIR, f"q_features_{split_name}_basicmlp_mortality1d_only.csv")
+    fname = os.path.join(CSV_DIR, f"q_features_{split_name}_basicmlp_mortality365d_only.csv")
     out_df.to_csv(fname, index=False)
     print(f"Saved -> {fname}")
     return out_df
@@ -395,5 +395,5 @@ val_features  = extract_qmodel_features(val_loader,  val_df,  "val")
 test_features = extract_qmodel_features(test_loader, test_df, "test")
 
 print("Done. Q-model input files ready:")
-print(f"  {CSV_DIR}/q_features_val_basicmlp_mortality1d_only.csv  (for training the Q-model)")
-print(f"  {CSV_DIR}/q_features_test_basicmlp_mortality1d_only.csv (for evaluating the Q-model)")
+print(f"  {CSV_DIR}/q_features_val_basicmlp_mortality365d_only.csv  (for training the Q-model)")
+print(f"  {CSV_DIR}/q_features_test_basicmlp_mortality365d_only.csv (for evaluating the Q-model)")

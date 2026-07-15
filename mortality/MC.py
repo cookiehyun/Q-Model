@@ -1,5 +1,5 @@
 """
-MC Dropout base model for 24h Mortality deterioration prediction.
+MC Dropout base model for 365d Mortality deterioration prediction.
 Trains a single MLP encoder (mask included), then at inference time
 keeps dropout active and runs T=50 stochastic forward passes per sample.
 The mean prediction is used as the probability; variance and entropy
@@ -98,7 +98,7 @@ LIN_FTRS       = [128, 128, 128]
 PROB_THRESHOLD = 0.10
 MC_SAMPLES     = 50
 EPSILON        = 1e-10
-TARGET_COL     = "deterioration_mortality_1d"
+TARGET_COL     = "deterioration_mortality_365d"
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
@@ -108,7 +108,7 @@ os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(PNG_DIR, exist_ok=True)
 
 DATA_PATH = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-PT_PATH   = os.path.join(BASE_DIR, "best_mcdropout_mortality1d_only_mask.pt")
+PT_PATH   = os.path.join(BASE_DIR, "best_mcdropout_mortality365d_only_mask.pt")
 
 # ------------------------------------------------------------
 # 1. Load data
@@ -212,7 +212,7 @@ mlp_cfg = MLPConfig(
 
 encoder = BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1)
 
-def bce_loss_mortality1d(logits, targets):
+def bce_loss_mortality365d(logits, targets):
     mask = ~torch.isnan(targets.squeeze(-1))
     if mask.sum() == 0:
         return torch.tensor(0.0, requires_grad=True)
@@ -235,7 +235,7 @@ for epoch in range(EPOCHS):
         cont, cat, labels = cont.to(device), cat.to(device), labels.to(device)
         optimizer.zero_grad()
         logits = encoder(static=cont, static_cat=cat)["static"]
-        loss   = bce_loss_mortality1d(logits, labels)
+        loss   = bce_loss_mortality365d(logits, labels)
         loss.backward()
         optimizer.step()
         train_loss += loss.item()
@@ -308,7 +308,7 @@ def find_threshold_for_sensitivity(probs, labels, target_sens=0.80, thr_grid=Non
     """Scan thresholds on val set and return the one whose sensitivity
     is closest to target_sens."""
     if thr_grid is None:
-        thr_grid = np.arange(0.001, 0.51, 0.001)  # fine grid, low range for rare events
+        thr_grid = np.arange(0.001, 0.51, 0.001)  # even grid, works well for ~13.8% positive rate
 
     best_thr, best_diff, best_sens = None, np.inf, 0
     for thr in thr_grid:
@@ -348,10 +348,10 @@ def extract_qmodel_features(prob, var, ent, true_label, split_name):
     print(f"[{split_name}] TP={tp} FP={fp} FN={fn} TN={tn} sens={sens:.4f}")
 
     out_df = pd.DataFrame({
-        "prob_mortality1d": prob, "variance": var, "entropy": ent,
+        "prob_mortality365d": prob, "variance": var, "entropy": ent,
         "true_label": true_label, "pred_label": pred, "error_label": error,
     })
-    fname = os.path.join(CSV_DIR, f"q_features_{split_name}_mcdropout_mortality1d_only_mask.csv")
+    fname = os.path.join(CSV_DIR, f"q_features_{split_name}_mcdropout_mortality365d_only_mask.csv")
     out_df.to_csv(fname, index=False)
     print(f"Saved -> {fname}")
     return out_df

@@ -1,5 +1,5 @@
 """
-Deep Ensemble base model for 24h Mortality deterioration prediction.
+Deep Ensemble base model for 365d Mortality deterioration prediction.
 Trains M=5 independently-initialized MLP encoders (mask included as features).
 At inference time, the ensemble mean is used as the probability, and
 variance / entropy / spread across members are used as uncertainty
@@ -113,7 +113,7 @@ LIN_FTRS        = [128, 128, 128]
 M               = 5          # number of ensemble members
 PROB_THRESHOLD  = 0.10
 EPSILON         = 1e-10
-TARGET_TASK     = "mortality_1d"
+TARGET_TASK     = "mortality_365d"
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
@@ -231,7 +231,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def build_model():
     return BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=1)
 
-def mortality1d_loss(preds, targets):
+def mortality365d_loss(preds, targets):
     mask = ~torch.isnan(targets)
     if mask.sum() == 0:
         return torch.tensor(0.0, requires_grad=True)
@@ -251,7 +251,7 @@ for m in range(M):
     model     = build_model().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
-    best_val_auroc_mortality1d = 0
+    best_val_auroc_mortality365d = 0
     best_epoch             = 0
 
     for epoch in range(EPOCHS):
@@ -260,7 +260,7 @@ for m in range(M):
         for cont, cat, labels in train_loader:
             cont, cat, labels = cont.to(device), cat.to(device), labels.to(device)
             optimizer.zero_grad()
-            loss = mortality1d_loss(model(static=cont, static_cat=cat)["static"], labels)
+            loss = mortality365d_loss(model(static=cont, static_cat=cat)["static"], labels)
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -278,19 +278,19 @@ for m in range(M):
 
         mask = ~np.isnan(all_labels[:, 0])
         if mask.sum() > 0 and len(np.unique(all_labels[mask, 0])) > 1:
-            val_auroc_mortality1d = roc_auc_score(all_labels[mask, 0], all_preds[mask, 0])
+            val_auroc_mortality365d = roc_auc_score(all_labels[mask, 0], all_preds[mask, 0])
         else:
-            val_auroc_mortality1d = float('nan')
+            val_auroc_mortality365d = float('nan')
 
-        print(f"  epoch {epoch+1:02d}/{EPOCHS} | loss {train_loss/len(train_loader):.4f} | val AUROC {val_auroc_mortality1d:.4f}")
+        print(f"  epoch {epoch+1:02d}/{EPOCHS} | loss {train_loss/len(train_loader):.4f} | val AUROC {val_auroc_mortality365d:.4f}")
 
-        if not np.isnan(val_auroc_mortality1d) and val_auroc_mortality1d > best_val_auroc_mortality1d:
-            best_val_auroc_mortality1d = val_auroc_mortality1d
+        if not np.isnan(val_auroc_mortality365d) and val_auroc_mortality365d > best_val_auroc_mortality365d:
+            best_val_auroc_mortality365d = val_auroc_mortality365d
             best_epoch             = epoch + 1
-            torch.save(model.state_dict(), os.path.join(BASE_DIR, f'ensemble_member_{m}_mortality1d_only_mask.pt'))
+            torch.save(model.state_dict(), os.path.join(BASE_DIR, f'ensemble_member_{m}_mortality365d_only_mask.pt'))
 
-    print(f"  best val AUROC {best_val_auroc_mortality1d:.4f} at epoch {best_epoch}")
-    model.load_state_dict(torch.load(os.path.join(BASE_DIR, f'ensemble_member_{m}_mortality1d_only_mask.pt'), map_location=device))
+    print(f"  best val AUROC {best_val_auroc_mortality365d:.4f} at epoch {best_epoch}")
+    model.load_state_dict(torch.load(os.path.join(BASE_DIR, f'ensemble_member_{m}_mortality365d_only_mask.pt'), map_location=device))
     model.eval()
     ensemble_models.append(model)
 
@@ -380,10 +380,10 @@ def extract_qmodel_features(mean_probs, variance, entropy, spread, labels, split
     print(f"[{split_name}] TP={tp} FP={fp} FN={fn} TN={tn} sens={sens:.4f}")
 
     out_df = pd.DataFrame({
-        "prob_mortality1d": prob_icu, "variance": var_icu, "entropy": ent_icu, "spread": spr_icu,
+        "prob_mortality365d": prob_icu, "variance": var_icu, "entropy": ent_icu, "spread": spr_icu,
         "true_label": true_icu, "pred_label": pred_icu, "error_label": error_label,
     })
-    fname = os.path.join(CSV_DIR, f"q_features_{split_name}_ensemble_mortality1d_only_mask.csv")
+    fname = os.path.join(CSV_DIR, f"q_features_{split_name}_ensemble_mortality365d_only_mask.csv")
     out_df.to_csv(fname, index=False)
     print(f"Saved -> {fname}")
     return out_df
