@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Large generated/data files
+src/data/memmap/mds_ed.csv
