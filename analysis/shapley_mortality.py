@@ -20,8 +20,12 @@ Outputs:
     feature_importance_{base_model}.csv           <- XGB gain importance (comparable across all 4)
     shap_values_{base_model}.npy                  <- raw SHAP values for the winning model type
     shap_beeswarm_{base_model}.png                 <- per-model SHAP beeswarm plot
+        (y-axis labels now annotated with each feature's mean |SHAP| value, e.g. "prob_mortality365d (1.16)")
     qmodel_feature_importance_top5_4models_comparison_mortality365d.png
-    qmodel_shap_top5_4models_comparison_mortality365d.png
+
+NOTE: the combined SHAP comparison bar chart
+(qmodel_shap_top5_4models_comparison_mortality365d.png) has been removed
+per request — only the per-model SHAP beeswarm plots are produced now.
 
 ASSUMPTION: each experiments/mortality/<model>/calibrate.py has already
 been run, producing results/csv/*.npz inside its own model folder
@@ -262,8 +266,7 @@ def average_shap_crossfit(models, model_type, X_background, X_explain, feature_n
     return np.mean(all_sv, axis=0)
 
 
-all_top5_gain = {}   # model_label -> DataFrame(feature, importance_norm)
-all_top5_shap = {}   # model_label -> DataFrame(feature, mean_abs_shap_norm)
+all_top5_shap = {}   # model_label -> DataFrame(feature, mean_abs_shap, importance_norm)
 
 MODEL_ORDER = ['BasicMLP', 'Deep Ensemble', 'MC Dropout', 'XGBoost']
 
@@ -402,10 +405,6 @@ for base_model in MODEL_ORDER:
                   index=False)
     print(imp_df.head(5).to_string(index=False))
 
-    top5_gain = imp_df.nlargest(5, 'importance_gain').copy()
-    top5_gain['importance_norm'] = top5_gain['importance_gain'] / top5_gain['importance_gain'].max()
-    all_top5_gain[base_model] = top5_gain[['feature', 'importance_norm']]
-
     # ---- (2) SHAP using the ACTUAL winning model type ----
     rng = np.random.default_rng(RANDOM_STATE)
     n = X_train_q.shape[0]
@@ -437,12 +436,27 @@ for base_model in MODEL_ORDER:
 
     top5_shap = shap_df.nlargest(5, 'mean_abs_shap').copy()
     top5_shap['importance_norm'] = top5_shap['mean_abs_shap'] / top5_shap['mean_abs_shap'].max()
-    all_top5_shap[base_model] = top5_shap[['feature', 'importance_norm']]
+    all_top5_shap[base_model] = top5_shap[['feature', 'mean_abs_shap', 'importance_norm']]
 
     # ---- per-model beeswarm plot ----
     try:
         plt.figure()
         shap.summary_plot(shap_vals, X_exp, feature_names=feature_names, show=False, max_display=5)
+
+        # annotate y-axis labels with each feature's mean |SHAP| value,
+        # e.g. "prob_mortality365d (1.16)". shap.summary_plot draws rows
+        # top-to-bottom in descending mean|SHAP| order, matching top5_shap's
+        # own sort order, so we can zip them directly.
+        ax = plt.gca()
+        annotated_labels = [
+            f"{feat} ({val:.2f})"
+            for feat, val in zip(
+                top5_shap['feature'][::-1],
+                top5_shap['mean_abs_shap'][::-1],
+            )
+        ]
+        ax.set_yticklabels(annotated_labels)
+
         plt.title(f"{base_model} Q-model SHAP beeswarm ({cfg['qtype']}) — 365d Mortality")
         plt.tight_layout()
         plt.savefig(os.path.join(FIGURES_DIR, f"shap_beeswarm_{base_model.replace(' ', '').lower()}_mortality365d.png"),
@@ -456,56 +470,4 @@ for base_model in MODEL_ORDER:
     torch.cuda.empty_cache()
 
 
-# ============================================================
-# Combined comparison plots (gain importance AND SHAP)
-# ============================================================
-MODEL_COLORS = {
-    'BasicMLP':      '#1f77b4',
-    'Deep Ensemble': '#ff7f0e',
-    'MC Dropout':    '#2ca02c',
-    'XGBoost':       '#d62728',
-}
-
-def plot_combined(all_top5, title, out_name):
-    union_features = list(dict.fromkeys(
-        f for model in MODEL_ORDER for f in all_top5[model]['feature']
-    ))
-
-    def lookup(model, feat):
-        row = all_top5[model][all_top5[model]['feature'] == feat]
-        return row['importance_norm'].values[0] if len(row) > 0 else 0.0
-
-    n_models = len(MODEL_ORDER)
-    bar_height = 0.8 / n_models
-    y = np.arange(len(union_features))
-
-    fig, ax = plt.subplots(figsize=(10, max(4, len(union_features) * 0.6)))
-    for i, model in enumerate(MODEL_ORDER):
-        offset = (i - (n_models - 1) / 2) * bar_height
-        vals = [lookup(model, f) for f in union_features]
-        ax.barh(y + offset, vals, height=bar_height, label=model, color=MODEL_COLORS[model])
-
-    ax.set_yticks(y)
-    ax.set_yticklabels(union_features, fontsize=10)
-    ax.invert_yaxis()
-    ax.set_xlabel("Normalized Importance (within-model max = 1.0)", fontsize=11, fontweight='bold')
-    ax.set_title(title, fontsize=13, fontweight='bold')
-    ax.legend(title="Base Model")
-    ax.grid(True, alpha=0.3, axis='x')
-    plt.tight_layout()
-    fig_path = os.path.join(FIGURES_DIR, out_name)
-    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Combined plot saved: {fig_path}")
-
-plot_combined(all_top5_gain,
-              "Q-Model Feature Importance (XGB gain) - Top 5 per Base Model\n"
-              "(calibrated features, confirmed best threshold/strategy, 365d Mortality)",
-              "qmodel_feature_importance_top5_4models_comparison_mortality365d.png")
-
-plot_combined(all_top5_shap,
-              "Q-Model SHAP Importance (mean |SHAP|, winning model type) - Top 5 per Base Model\n"
-              "(calibrated features, confirmed best threshold/strategy, 365d Mortality)",
-              "qmodel_shap_top5_4models_comparison_mortality365d.png")
-
-print("\nAll done.")
+print("\nAll done. (beeswarm plots only; no combined comparison chart)")
