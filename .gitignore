@@ -5,3 +5,10 @@ __pycache__/
 
 # Large generated/data files
 src/data/memmap/mds_ed.csv
+
+*.pt
+*.pth
+*.ckpt
+*.csv
+checkpoints/*
+!checkpoints/.gitkeep
