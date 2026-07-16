@@ -7,8 +7,12 @@ and saves everything needed by qmodel_sweep.py into a single .npz file,
 so the sweep script never needs to reload the model or rerun inference.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+import config
 import sys
-sys.path.insert(0, "/fs/dss/home/gaad2403/MDS-ED/src")
+sys.path.insert(0, config.SRC_DIR)
 
 import os
 import warnings
@@ -32,11 +36,11 @@ from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
 # ============================================================
 # Paths
 # ============================================================
-BASE_DIR    = "/fs/dss/home/gaad2403/MDS-ED/key/Final/basicMLP"
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
-DATA_PATH   = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-PT_PATH     = os.path.join(BASE_DIR, "best_basicmlp_icu24h_only.pt")
+DATA_PATH   = config.DATA_PATH
+PT_PATH     = os.path.join(config.CKPT_ROOT, "icu24h", "basicmlp", "best_basicmlp_icu24h_only.pt")
 NPZ_OUT     = os.path.join(CSV_DIR, "calibrated_probs.npz")
 
 os.makedirs(CSV_DIR, exist_ok=True)

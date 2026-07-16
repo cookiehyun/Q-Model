@@ -10,5 +10,12 @@ src/data/memmap/mds_ed.csv
 *.pth
 *.ckpt
 *.csv
-checkpoints/*
-!checkpoints/.gitkeep
+checkpoints/**
+!checkpoints/**/
+!checkpoints/**/.gitkeep
+
+logs/*
+
+*.patch
+
+*npz

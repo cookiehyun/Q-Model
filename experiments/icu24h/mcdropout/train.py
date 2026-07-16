@@ -6,8 +6,12 @@ The mean prediction is used as the probability; variance and entropy
 across the T samples are used as uncertainty features for the Q-model.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+import config
 import sys
-sys.path.insert(0, "/fs/dss/home/gaad2403/MDS-ED/src")
+sys.path.insert(0, config.SRC_DIR)
 
 import torch
 from torch import nn
@@ -106,9 +110,11 @@ CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
 PNG_DIR     = os.path.join(RESULTS_DIR, "png")
 os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(PNG_DIR, exist_ok=True)
+CKPT_DIR    = os.path.join(config.CKPT_ROOT, "icu24h", "mcdropout")
+os.makedirs(CKPT_DIR, exist_ok=True)
 
-DATA_PATH = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
-PT_PATH   = os.path.join(BASE_DIR, "best_mcdropout_icu24h_only_mask.pt")
+DATA_PATH   = config.DATA_PATH
+PT_PATH   = os.path.join(CKPT_DIR, "best_mcdropout_icu24h_only_mask.pt")
 
 # ------------------------------------------------------------
 # 1. Load data

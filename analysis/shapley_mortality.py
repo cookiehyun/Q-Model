@@ -12,7 +12,7 @@ derived from prob_thr_sweep_summary_*_mortality365d_..._WITH_CALIBRATION.csv:
 
 Unlike the sweep scripts, this script SAVES every winning Q-model it
 trains (joblib for LR/XGB, torch state_dict for MLP) to
-{COMPARISON_DIR}/qmodels/, so re-running this script (or loading the
+results/mortality/artifacts/qmodels/, so re-running this script (or loading the
 models elsewhere) never needs to retrain from scratch again.
 
 Outputs:
@@ -23,13 +23,18 @@ Outputs:
     qmodel_feature_importance_top5_4models_comparison_mortality365d.png
     qmodel_shap_top5_4models_comparison_mortality365d.png
 
-ASSUMPTION: the 4 cali_*_mortality365d.py scripts were run from
-/user/gaad2403/MDS-ED/key/Final/mortality/ (the shared folder that
-holds all 4 base models' .pt checkpoints and results/csv/*.npz, per
-the training logs). If that's not where the npz files actually are,
-update the npz paths in CONFIGS below.
+ASSUMPTION: each experiments/mortality/<model>/calibrate.py has already
+been run, producing results/csv/*.npz inside its own model folder
+(experiments/mortality/<model>/results/csv/). Checkpoints (.pt) live
+under config.CKPT_ROOT/mortality/<model>/, not next to the scripts.
+If that's not where the npz files actually are, update the npz paths
+in CONFIGS below.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
 import os
 import warnings
 warnings.filterwarnings('ignore')
@@ -50,12 +55,13 @@ import matplotlib.pyplot as plt
 
 RANDOM_STATE = 42
 DEVICE       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-DATA_PATH    = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
+DATA_PATH   = config.DATA_PATH
 
-MORTALITY_BASE_DIR = "/user/gaad2403/MDS-ED/key/Final/mortality"
-COMPARISON_DIR      = os.path.join(MORTALITY_BASE_DIR, "comparison")
-QMODEL_DIR          = os.path.join(COMPARISON_DIR, "qmodels")
-os.makedirs(COMPARISON_DIR, exist_ok=True)
+FIGURES_DIR   = os.path.join(config.PROJECT_ROOT, "results", "mortality", "figures")
+ARTIFACTS_DIR = os.path.join(config.PROJECT_ROOT, "results", "mortality", "artifacts")
+QMODEL_DIR    = os.path.join(ARTIFACTS_DIR, "qmodels")
+os.makedirs(FIGURES_DIR, exist_ok=True)
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 os.makedirs(QMODEL_DIR, exist_ok=True)
 
 XGB_PARAMS     = dict(n_estimators=200, max_depth=4, learning_rate=0.05,
@@ -266,27 +272,27 @@ MODEL_ORDER = ['BasicMLP', 'Deep Ensemble', 'MC Dropout', 'XGBoost']
 # (thr, strategy, qmodel_type, npz_path, extra_feature_cols)
 # derived from prob_thr_sweep_summary_*_mortality365d_..._WITH_CALIBRATION.csv
 # ============================================================
-CSV_DIR = os.path.join(MORTALITY_BASE_DIR, "results", "csv")
+EXPER_MORTALITY_DIR = os.path.join(config.PROJECT_ROOT, "experiments", "mortality")
 
 CONFIGS = {
     'BasicMLP': dict(
         thr=0.11, strategy='CrossFit', qtype='XGB',
-        npz=os.path.join(CSV_DIR, "calibrated_probs_basicmlp_mortality365d.npz"),
+        npz=os.path.join(EXPER_MORTALITY_DIR, "basicmlp", "results", "csv", "calibrated_probs_basicmlp_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso'],
     ),
     'Deep Ensemble': dict(
         thr=0.14, strategy='Simple', qtype='XGB',
-        npz=os.path.join(CSV_DIR, "calibrated_probs_ensemble_mortality365d.npz"),
+        npz=os.path.join(EXPER_MORTALITY_DIR, "deepensemble", "results", "csv", "calibrated_probs_ensemble_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso', 'var', 'ent', 'spr'],
     ),
     'MC Dropout': dict(
         thr=0.15, strategy='Simple', qtype='MLP',
-        npz=os.path.join(CSV_DIR, "calibrated_probs_mc_mortality365d.npz"),
+        npz=os.path.join(EXPER_MORTALITY_DIR, "mcdropout", "results", "csv", "calibrated_probs_mc_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso', 'var', 'ent'],
     ),
     'XGBoost': dict(
         thr=0.11, strategy='Simple', qtype='XGB',
-        npz=os.path.join(CSV_DIR, "calibrated_probs_xgb_mortality365d.npz"),
+        npz=os.path.join(EXPER_MORTALITY_DIR, "xgboost", "results", "csv", "calibrated_probs_xgb_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso'],
     ),
 }
@@ -392,7 +398,7 @@ for base_model in MODEL_ORDER:
     imp = xgb_gain_importance(X_train_q, train_err, feature_names)
     imp_df = pd.DataFrame({'feature': feature_names, 'importance_gain': imp}).sort_values(
         'importance_gain', ascending=False)
-    imp_df.to_csv(os.path.join(COMPARISON_DIR, f"feature_importance_{base_model.replace(' ', '').lower()}_mortality365d.csv"),
+    imp_df.to_csv(os.path.join(ARTIFACTS_DIR, f"feature_importance_{base_model.replace(' ', '').lower()}_mortality365d.csv"),
                   index=False)
     print(imp_df.head(5).to_string(index=False))
 
@@ -420,12 +426,12 @@ for base_model in MODEL_ORDER:
     else:
         shap_vals = average_shap_crossfit(winning_models, cfg['qtype'], X_bg, X_exp, feature_names)
 
-    np.save(os.path.join(COMPARISON_DIR, f"shap_values_{base_model.replace(' ', '').lower()}_mortality365d.npy"), shap_vals)
+    np.save(os.path.join(ARTIFACTS_DIR, f"shap_values_{base_model.replace(' ', '').lower()}_mortality365d.npy"), shap_vals)
 
     mean_abs_shap = np.abs(shap_vals).mean(axis=0)
     shap_df = pd.DataFrame({'feature': feature_names, 'mean_abs_shap': mean_abs_shap}).sort_values(
         'mean_abs_shap', ascending=False)
-    shap_df.to_csv(os.path.join(COMPARISON_DIR, f"shap_importance_{base_model.replace(' ', '').lower()}_mortality365d.csv"),
+    shap_df.to_csv(os.path.join(ARTIFACTS_DIR, f"shap_importance_{base_model.replace(' ', '').lower()}_mortality365d.csv"),
                    index=False)
     print(shap_df.head(5).to_string(index=False))
 
@@ -439,7 +445,7 @@ for base_model in MODEL_ORDER:
         shap.summary_plot(shap_vals, X_exp, feature_names=feature_names, show=False, max_display=5)
         plt.title(f"{base_model} Q-model SHAP beeswarm ({cfg['qtype']}) — 365d Mortality")
         plt.tight_layout()
-        plt.savefig(os.path.join(COMPARISON_DIR, f"shap_beeswarm_{base_model.replace(' ', '').lower()}_mortality365d.png"),
+        plt.savefig(os.path.join(FIGURES_DIR, f"shap_beeswarm_{base_model.replace(' ', '').lower()}_mortality365d.png"),
                     dpi=150, bbox_inches='tight')
         plt.close()
     except Exception as e:
@@ -487,7 +493,7 @@ def plot_combined(all_top5, title, out_name):
     ax.legend(title="Base Model")
     ax.grid(True, alpha=0.3, axis='x')
     plt.tight_layout()
-    fig_path = os.path.join(COMPARISON_DIR, out_name)
+    fig_path = os.path.join(FIGURES_DIR, out_name)
     plt.savefig(fig_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Combined plot saved: {fig_path}")

@@ -4,6 +4,10 @@ probabilities produced by cali.py (loaded from calibrated_probs.npz).
 Does NOT reload the pretrained encoder or rerun inference.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+import config
 import os
 import warnings
 warnings.filterwarnings('ignore')
@@ -22,10 +26,10 @@ from xgboost import XGBClassifier
 # ============================================================
 # Paths
 # ============================================================
-BASE_DIR    = "/fs/dss/home/gaad2403/MDS-ED/key/Final/basicMLP"
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
-DATA_PATH   = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
+DATA_PATH   = config.DATA_PATH
 NPZ_IN      = os.path.join(CSV_DIR, "calibrated_probs.npz")
 
 PROB_THRESHOLDS = np.round(np.arange(0.00, 0.21, 0.01), 2)

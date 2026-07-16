@@ -5,6 +5,10 @@ sensitivity is closest to 0.80 -- run this first, before the full
 qmodel_xgboost.py sweep, to know what PROB_THRESHOLDS range to use.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+import config
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
@@ -15,7 +19,7 @@ warnings.filterwarnings('ignore')
 # ------------------------------------------------------------
 # Paths / config
 # ------------------------------------------------------------
-DATA_PATH    = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
+DATA_PATH   = config.DATA_PATH
 TARGET_IDX   = 0  # 'deterioration_mortality_365d' is column 0 in target_columns
 RANDOM_STATE = 42
 

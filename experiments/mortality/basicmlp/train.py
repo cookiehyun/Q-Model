@@ -4,8 +4,12 @@ Trains a static (tabular) MLP encoder on demographics/vitals/labs/biometrics,
 then extracts probability outputs used later as Q-model input features.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+import config
 import sys
-sys.path.insert(0, "/fs/dss/home/gaad2403/MDS-ED/src")
+sys.path.insert(0, config.SRC_DIR)
 
 import torch
 from torch import nn
@@ -119,8 +123,10 @@ CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
 PNG_DIR     = os.path.join(RESULTS_DIR, "png")
 os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(PNG_DIR, exist_ok=True)
+CKPT_DIR    = os.path.join(config.CKPT_ROOT, "mortality", "basicmlp")
+os.makedirs(CKPT_DIR, exist_ok=True)
 
-DATA_PATH = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
+DATA_PATH   = config.DATA_PATH
 
 # ------------------------------------------------------------
 # 1. Load data
@@ -295,14 +301,14 @@ for epoch in range(EPOCHS):
     if not np.isnan(val_auroc_mortality365d) and val_auroc_mortality365d > best_val_auroc_mortality365d:
         best_val_auroc_mortality365d = val_auroc_mortality365d
         best_epoch            = epoch + 1
-        torch.save(encoder.state_dict(), os.path.join(BASE_DIR, 'best_basicmlp_mortality365d_only.pt'))
+        torch.save(encoder.state_dict(), os.path.join(CKPT_DIR, "best_basicmlp_mortality365d_only.pt"))
 
 print(f"Best val AUROC: {best_val_auroc_mortality365d:.4f} at epoch {best_epoch}")
 
 # ------------------------------------------------------------
 # 7. Inference + Q-model feature export
 # ------------------------------------------------------------
-encoder.load_state_dict(torch.load(os.path.join(BASE_DIR, 'best_basicmlp_mortality365d_only.pt'), map_location=device))
+encoder.load_state_dict(torch.load(os.path.join(CKPT_DIR, "best_basicmlp_mortality365d_only.pt"), map_location=device))
 encoder.eval()
 
 def find_threshold_for_sensitivity(probs, labels, target_sens=0.80, thr_grid=None):

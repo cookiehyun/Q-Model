@@ -14,6 +14,10 @@ no checkpoint file, so the base model is retrained inside this script,
 same as the icu_24h version).
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+import config
 import os
 import warnings
 warnings.filterwarnings('ignore')
@@ -31,7 +35,7 @@ from xgboost import XGBClassifier
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
-DATA_PATH   = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
+DATA_PATH   = config.DATA_PATH
 NPZ_OUT     = os.path.join(CSV_DIR, "calibrated_probs_xgb_mortality365d.npz")
 
 os.makedirs(CSV_DIR, exist_ok=True)

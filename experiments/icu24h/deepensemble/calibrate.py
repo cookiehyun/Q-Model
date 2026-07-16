@@ -10,8 +10,12 @@ and saves everything needed by qmodel_sweep_ensemble.py into a single
 .npz file so the sweep script never needs to reload the models.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+import config
 import sys
-sys.path.insert(0, "/fs/dss/home/gaad2403/MDS-ED/src")
+sys.path.insert(0, config.SRC_DIR)
 
 import os
 import warnings
@@ -35,10 +39,10 @@ from clinical_ts.ts.basic_conv1d_modules.basic_conv1d import bn_drop_lin
 # ============================================================
 # Paths
 # ============================================================
-BASE_DIR    = "/user/gaad2403/MDS-ED/key/Final/DeepEnsemble"
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 CSV_DIR     = os.path.join(RESULTS_DIR, "csv")
-DATA_PATH   = "/user/gaad2403/MDS-ED/src/data/memmap/mds_ed.csv"
+DATA_PATH   = config.DATA_PATH
 NPZ_OUT     = os.path.join(CSV_DIR, "calibrated_probs_ensemble.npz")
 
 os.makedirs(CSV_DIR, exist_ok=True)
@@ -216,7 +220,7 @@ mlp_cfg = MLPConfig(
 print(f"\nLoading {M} ensemble members...")
 ensemble_models = []
 for m in range(M):
-    pt_path = os.path.join(BASE_DIR, f"ensemble_member_{m}_icu24h_only_mask.pt")
+    pt_path = os.path.join(config.CKPT_ROOT, "icu24h", "deepensemble", f"ensemble_member_{m}_icu24h_only_mask.pt")
     model   = BasicEncoderStaticMLP(mlp_cfg, shape, target_dim=len(lbl_itos)).to(DEVICE)
     model.load_state_dict(torch.load(pt_path, map_location=DEVICE))
     model.eval()
