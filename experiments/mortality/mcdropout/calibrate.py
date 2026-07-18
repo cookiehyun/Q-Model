@@ -270,6 +270,8 @@ train_ent_icu  = train_ent[train_mask]
 train_true_icu = train_labels[train_mask].astype(int)
 
 val_prob_icu = val_mean[val_mask]
+val_var_icu  = val_var[val_mask]
+val_ent_icu  = val_ent[val_mask]
 val_true_icu = val_labels[val_mask].astype(int)
 
 test_prob_icu = test_mean[test_mask]
@@ -308,9 +310,12 @@ iso.fit(val_prob_icu, val_true_icu)
 
 train_prob_icu_platt = platt.predict_proba(train_prob_icu.reshape(-1, 1))[:, 1]
 test_prob_icu_platt  = platt.predict_proba(test_prob_icu.reshape(-1, 1))[:, 1]
+val_prob_icu_platt   = platt.predict_proba(val_prob_icu.reshape(-1, 1))[:, 1]
 
 train_prob_icu_iso = iso.predict(train_prob_icu)
 test_prob_icu_iso  = iso.predict(test_prob_icu)
+val_prob_icu_iso   = iso.predict(val_prob_icu)
+
 
 ece_val_orig   = compute_ece(val_true_icu, val_prob_icu)
 ece_test_orig  = compute_ece(test_true_icu, test_prob_icu)
@@ -340,11 +345,15 @@ np.savez(
     train_mask=train_mask, test_mask=test_mask, val_mask=val_mask,
     train_prob_icu=train_prob_icu, train_var_icu=train_var_icu,
     train_ent_icu=train_ent_icu, train_true_icu=train_true_icu,
-    val_prob_icu=val_prob_icu, val_true_icu=val_true_icu,
+    val_prob_icu=val_prob_icu, val_var_icu=val_var_icu,
+    val_ent_icu=val_ent_icu, val_true_icu=val_true_icu,
     test_prob_icu=test_prob_icu, test_var_icu=test_var_icu,
     test_ent_icu=test_ent_icu, test_true_icu=test_true_icu,
     train_prob_icu_platt=train_prob_icu_platt, test_prob_icu_platt=test_prob_icu_platt,
+    val_prob_icu_platt=val_prob_icu_platt,
     train_prob_icu_iso=train_prob_icu_iso, test_prob_icu_iso=test_prob_icu_iso,
+    val_prob_icu_iso=val_prob_icu_iso,
 )
+
 print(f"\nSaved calibrated probabilities -> {NPZ_OUT}")
 print("cali_mc_mortality365d.py done.")

@@ -283,9 +283,11 @@ iso.fit(val_prob_icu, val_true_icu)
 
 train_prob_icu_platt = platt.predict_proba(train_prob_icu.reshape(-1, 1))[:, 1]
 test_prob_icu_platt  = platt.predict_proba(test_prob_icu.reshape(-1, 1))[:, 1]
+val_prob_icu_platt   = platt.predict_proba(val_prob_icu.reshape(-1, 1))[:, 1]
 
 train_prob_icu_iso = iso.predict(train_prob_icu)
 test_prob_icu_iso  = iso.predict(test_prob_icu)
+val_prob_icu_iso   = iso.predict(val_prob_icu)
 
 ece_val_orig   = compute_ece(val_true_icu, val_prob_icu)
 ece_test_orig  = compute_ece(test_true_icu, test_prob_icu)
@@ -317,7 +319,9 @@ np.savez(
     val_prob_icu=val_prob_icu, val_true_icu=val_true_icu,
     test_prob_icu=test_prob_icu, test_true_icu=test_true_icu,
     train_prob_icu_platt=train_prob_icu_platt, test_prob_icu_platt=test_prob_icu_platt,
+    val_prob_icu_platt=val_prob_icu_platt,
     train_prob_icu_iso=train_prob_icu_iso, test_prob_icu_iso=test_prob_icu_iso,
+    val_prob_icu_iso=val_prob_icu_iso,
 )
 print(f"\nSaved calibrated probabilities -> {NPZ_OUT}")
 print("cali_basicmlp_mortality365d.py done.")

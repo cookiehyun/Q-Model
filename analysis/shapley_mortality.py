@@ -5,10 +5,10 @@ features (original prob + platt + isotonic [+ variance/entropy/spread])
 and the CONFIRMED best (threshold, strategy, model_type) per base model,
 derived from prob_thr_sweep_summary_*_mortality365d_..._WITH_CALIBRATION.csv:
 
-    BasicMLP       | thr=0.11 | CrossFit | XGB
-    Deep Ensemble  | thr=0.14 | Simple   | XGB
-    MC Dropout     | thr=0.15 | Simple   | MLP
-    XGBoost        | thr=0.11 | Simple   | XGB
+BasicMLP       | thr=0.10 | Simple   | XGB
+Deep Ensemble  | thr=0.13 | Simple   | MLP
+MC Dropout     | thr=0.13 | CrossFit | MLP
+XGBoost        | thr=0.09 | Simple   | XGB
 
 Unlike the sweep scripts, this script SAVES every winning Q-model it
 trains (joblib for LR/XGB, torch state_dict for MLP) to
@@ -279,26 +279,27 @@ EXPER_MORTALITY_DIR = os.path.join(config.PROJECT_ROOT, "experiments", "mortalit
 
 CONFIGS = {
     'BasicMLP': dict(
-        thr=0.11, strategy='CrossFit', qtype='XGB',
+        thr=0.10, strategy='Simple', qtype='XGB',
         npz=os.path.join(EXPER_MORTALITY_DIR, "basicmlp", "results", "csv", "calibrated_probs_basicmlp_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso'],
     ),
     'Deep Ensemble': dict(
-        thr=0.14, strategy='Simple', qtype='XGB',
+        thr=0.13, strategy='Simple', qtype='MLP',
         npz=os.path.join(EXPER_MORTALITY_DIR, "deepensemble", "results", "csv", "calibrated_probs_ensemble_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso', 'var', 'ent', 'spr'],
     ),
     'MC Dropout': dict(
-        thr=0.15, strategy='Simple', qtype='MLP',
+        thr=0.13, strategy='CrossFit', qtype='MLP',
         npz=os.path.join(EXPER_MORTALITY_DIR, "mcdropout", "results", "csv", "calibrated_probs_mc_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso', 'var', 'ent'],
     ),
     'XGBoost': dict(
-        thr=0.11, strategy='Simple', qtype='XGB',
+        thr=0.09, strategy='Simple', qtype='XGB',
         npz=os.path.join(EXPER_MORTALITY_DIR, "xgboost", "results", "csv", "calibrated_probs_xgb_mortality365d.npz"),
         extra_cols=['prob', 'platt', 'iso'],
     ),
 }
+
 
 EXTRA_COL_KEYS = {
     'prob':  ('train_prob_icu', 'prob_mortality365d'),

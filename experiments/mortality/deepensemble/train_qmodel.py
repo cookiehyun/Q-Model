@@ -52,7 +52,7 @@ DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MLP_HIDDEN      = [64, 32]
 MLP_EPOCHS      = 50
 MLP_LR          = 1e-3
-MLP_BATCH_SIZE  = 64
+MLP_BATCH_SIZE  = 512
 MLP_DROPOUT     = 0.3
 
 print(f"prob_threshold sweep: {PROB_THRESHOLDS}")
@@ -65,6 +65,7 @@ print(f"\nLoading calibrated probabilities from {NPZ_IN} ...")
 npz = np.load(NPZ_IN)
 
 train_mask = npz["train_mask"]
+val_mask   = npz["val_mask"]
 test_mask  = npz["test_mask"]
 
 train_prob_icu = npz["train_prob_icu"]
@@ -72,6 +73,12 @@ train_var_icu  = npz["train_var_icu"]
 train_ent_icu  = npz["train_ent_icu"]
 train_spr_icu  = npz["train_spr_icu"]
 train_true_icu = npz["train_true_icu"]
+
+val_prob_icu = npz["val_prob_icu"]
+val_var_icu  = npz["val_var_icu"]
+val_ent_icu  = npz["val_ent_icu"]
+val_spr_icu  = npz["val_spr_icu"]
+val_true_icu = npz["val_true_icu"]
 
 test_prob_icu = npz["test_prob_icu"]
 test_var_icu  = npz["test_var_icu"]
@@ -84,7 +91,11 @@ test_prob_icu_platt  = npz["test_prob_icu_platt"]
 train_prob_icu_iso   = npz["train_prob_icu_iso"]
 test_prob_icu_iso    = npz["test_prob_icu_iso"]
 
+val_prob_icu_platt = npz["val_prob_icu_platt"]
+val_prob_icu_iso   = npz["val_prob_icu_iso"]
+
 print(f"Train mortality365d samples: {len(train_prob_icu)}")
+print(f"Val   mortality365d samples: {len(val_prob_icu)}")
 print(f"Test  mortality365d samples: {len(test_prob_icu)}")
 
 # ============================================================
@@ -135,23 +146,33 @@ for c in lbl_itos:
     df["deterioration_" + c] = df["deterioration_" + c].replace(-999., np.nan)
 
 train_df = df[df['general_strat_fold'].isin(range(0, 18))].reset_index(drop=True)
+val_df   = df[df['general_strat_fold'] == 18].reset_index(drop=True)
 test_df  = df[df['general_strat_fold'] == 19].reset_index(drop=True)
+val_df   = val_df[val_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 test_df  = test_df[test_df['general_ecg_no_within_stay'] == 0].reset_index(drop=True)
 
 # Sanity check: masks from cali_ensemble_mortality365d.py must match this df's row counts exactly.
 assert len(train_mask) == len(train_df), \
     f"train_mask length ({len(train_mask)}) != train_df length ({len(train_df)}) — " \
     f"cali_ensemble_mortality365d.py and qmodel_sweep_ensemble_mortality365d.py preprocessing have diverged, do not proceed."
+assert len(val_mask) == len(val_df), \
+    f"val_mask length ({len(val_mask)}) != val_df length ({len(val_df)}) — " \
+    f"cali_ensemble_mortality365d.py and qmodel_sweep_ensemble_mortality365d.py preprocessing have diverged, do not proceed."
 assert len(test_mask) == len(test_df), \
     f"test_mask length ({len(test_mask)}) != test_df length ({len(test_df)}) — " \
     f"cali_ensemble_mortality365d.py and qmodel_sweep_ensemble_mortality365d.py preprocessing have diverged, do not proceed."
 
 train_df_masked = train_df[train_mask].reset_index(drop=True)
+val_df_masked   = val_df[val_mask].reset_index(drop=True)
 test_df_masked  = test_df[test_mask].reset_index(drop=True)
 
 X_train_features = np.hstack([
     train_df_masked[cont_features].values.astype(np.float32),
     train_df_masked[cat_features].values.astype(np.float32)
+])
+X_val_features = np.hstack([
+    val_df_masked[cont_features].values.astype(np.float32),
+    val_df_masked[cat_features].values.astype(np.float32)
 ])
 X_test_features = np.hstack([
     test_df_masked[cont_features].values.astype(np.float32),
@@ -211,8 +232,9 @@ def fit_predict(model_type, X_tr, y_tr, X_eval):
         return m.predict_proba(X_eval)[:, 1]
 
 
-def get_qprobs(X_tr_feat, y_tr, X_te_feat,
+def get_qprobs(X_tr_feat, y_tr, X_val_feat, X_te_feat,
                tr_prob, tr_prob_platt, tr_prob_iso, tr_var, tr_ent, tr_spr,
+               val_prob_, val_prob_platt_, val_prob_iso_, val_var_, val_ent_, val_spr_,
                te_prob, te_prob_platt, te_prob_iso, te_var, te_ent, te_spr,
                model_type, verbose_label=""):
 
@@ -222,24 +244,34 @@ def get_qprobs(X_tr_feat, y_tr, X_te_feat,
         tr_var.reshape(-1, 1), tr_ent.reshape(-1, 1), tr_spr.reshape(-1, 1),
     ]).astype(np.float32)
 
+    X_val_q = np.hstack([
+        X_val_feat,
+        val_prob_.reshape(-1, 1), val_prob_platt_.reshape(-1, 1), val_prob_iso_.reshape(-1, 1),
+        val_var_.reshape(-1, 1), val_ent_.reshape(-1, 1), val_spr_.reshape(-1, 1),
+    ]).astype(np.float32)
+
     X_te_q = np.hstack([
         X_te_feat,
         te_prob.reshape(-1, 1), te_prob_platt.reshape(-1, 1), te_prob_iso.reshape(-1, 1),
         te_var.reshape(-1, 1), te_ent.reshape(-1, 1), te_spr.reshape(-1, 1),
     ]).astype(np.float32)
 
-    simple = fit_predict(model_type, X_tr_q, y_tr, X_te_q)
+    n_val = X_val_q.shape[0]
+    X_eval_q = np.vstack([X_val_q, X_te_q])
+
+    simple_all = fit_predict(model_type, X_tr_q, y_tr, X_eval_q)
+    simple_val, simple_te = simple_all[:n_val], simple_all[n_val:]
 
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    test_fold_preds = []
+    fold_preds = []
     for tri, _ in skf.split(X_tr_q, y_tr):
         Xt, yt = X_tr_q[tri], y_tr[tri]
-        test_fold_preds.append(fit_predict(model_type, Xt, yt, X_te_q))
-    cf = np.mean(test_fold_preds, axis=0)
+        fold_preds.append(fit_predict(model_type, Xt, yt, X_eval_q))
+    cf_all = np.mean(fold_preds, axis=0)
+    cf_val, cf_te = cf_all[:n_val], cf_all[n_val:]
 
     print(f"    [{model_type}{verbose_label}] fit done")
-    return simple, cf
-
+    return simple_val, simple_te, cf_val, cf_te
 
 def best_operating_point(q_probs, pred_base, true_label, fp_base):
     best_row = None
@@ -261,6 +293,22 @@ def best_operating_point(q_probs, pred_base, true_label, fp_base):
                                 FP_reduction_pct=round(fpr,2))
     return best_row
 
+def apply_fixed_qthr(q_probs, pred_base, true_label, fp_base, q_thr):
+    """Apply a pre-selected q_thr (chosen on val) to a fixed set (test),
+    with no search — this avoids leaking test labels into threshold choice."""
+    pred_new = pred_base.copy()
+    pred_new[q_probs >= q_thr] = 0
+    tp = int(((pred_new==1)&(true_label==1)).sum())
+    fp = int(((pred_new==1)&(true_label==0)).sum())
+    fn = int(((pred_new==0)&(true_label==1)).sum())
+    tn = int(((pred_new==0)&(true_label==0)).sum())
+    sens = tp/(tp+fn) if (tp+fn)>0 else 0
+    spec = tn/(tn+fp) if (tn+fp)>0 else 0
+    fpr  = (fp_base-fp)/fp_base*100 if fp_base>0 else 0
+    return dict(q_thr=q_thr, sensitivity=round(sens,4), specificity=round(spec,4),
+                TP=tp, FP=fp, FN=fn, TN=tn, FP_reduction_pct=round(fpr,2))
+
+
 # ============================================================
 # 4. Main sweep loop
 # ============================================================
@@ -274,9 +322,13 @@ for prob_thr in PROB_THRESHOLDS:
     print(f"\n>>> prob_threshold = {prob_thr:.2f}")
 
     train_pred = (train_prob_icu >= prob_thr).astype(int)
+    val_pred   = (val_prob_icu   >= prob_thr).astype(int)
     test_pred  = (test_prob_icu  >= prob_thr).astype(int)
     train_err  = (train_pred != train_true_icu).astype(int)
+    val_err    = (val_pred   != val_true_icu).astype(int)
     test_err   = (test_pred  != test_true_icu).astype(int)
+
+    fp_v = int(((val_pred==1)&(val_true_icu==0)).sum())
 
     tp_b = int(((test_pred==1)&(test_true_icu==1)).sum())
     fp_b = int(((test_pred==1)&(test_true_icu==0)).sum())
@@ -294,42 +346,48 @@ for prob_thr in PROB_THRESHOLDS:
     ))
 
     for mtype in ["LR", "MLP", "XGB"]:
-        q_simple, q_cf = get_qprobs(
-            X_train_features, train_err, X_test_features,
+        q_simple_val, q_simple_te, q_cf_val, q_cf_te = get_qprobs(
+            X_train_features, train_err, X_val_features, X_test_features,
             train_prob_icu, train_prob_icu_platt, train_prob_icu_iso,
             train_var_icu, train_ent_icu, train_spr_icu,
+            val_prob_icu, val_prob_icu_platt, val_prob_icu_iso,
+            val_var_icu, val_ent_icu, val_spr_icu,
             test_prob_icu, test_prob_icu_platt, test_prob_icu_iso,
             test_var_icu, test_ent_icu, test_spr_icu,
             mtype, verbose_label=f" @thr={prob_thr:.2f}"
         )
 
-        for strategy, q_probs in [("Simple", q_simple), ("CrossFit", q_cf)]:
-            auroc = roc_auc_score(test_err, q_probs) if len(np.unique(test_err))>1 else float('nan')
-            brier = brier_score_loss(test_err, q_probs)
+        for strategy, q_probs_val, q_probs_te in [
+            ("Simple", q_simple_val, q_simple_te),
+            ("CrossFit", q_cf_val, q_cf_te),
+        ]:
+            auroc = roc_auc_score(test_err, q_probs_te) if len(np.unique(test_err))>1 else float('nan')
+            brier = brier_score_loss(test_err, q_probs_te)
 
-            best = best_operating_point(q_probs, test_pred, test_true_icu, fp_b)
+            best_val = best_operating_point(q_probs_val, val_pred, val_true_icu, fp_v)
 
-            if best:
+            if best_val:
+                result = apply_fixed_qthr(q_probs_te, test_pred, test_true_icu, fp_b, best_val["q_thr"])
                 summary_rows.append(dict(
                     prob_thr=prob_thr, strategy=strategy, model=mtype,
                     base_sensitivity=round(sens_b,4),
-                    best_q_thr=best["q_thr"],
-                    sensitivity=best["sensitivity"],
-                    FP_reduction_pct=best["FP_reduction_pct"],
-                    TP=best["TP"], FP=best["FP"], FN=best["FN"], TN=best["TN"],
+                    best_q_thr=result["q_thr"],
+                    sensitivity=result["sensitivity"],
+                    FP_reduction_pct=result["FP_reduction_pct"],
+                    TP=result["TP"], FP=result["FP"], FN=result["FN"], TN=result["TN"],
                     AUROC=round(auroc,4), Brier=round(brier,4)
                 ))
             else:
                 summary_rows.append(dict(
                     prob_thr=prob_thr, strategy=strategy, model=mtype,
                     base_sensitivity=round(sens_b,4),
-                    best_q_thr="-", sensitivity="<0.80",
+                    best_q_thr="-", sensitivity="<0.80 (val)",
                     FP_reduction_pct="-",
                     TP="-", FP="-", FN="-", TN="-",
                     AUROC=round(auroc,4), Brier=round(brier,4)
                 ))
         print(f"  {mtype} done")
-
+                        
 # ============================================================
 # 5. Save summary
 # ============================================================

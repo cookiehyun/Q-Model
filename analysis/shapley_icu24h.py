@@ -267,22 +267,22 @@ MODEL_ORDER = ['BasicMLP', 'Deep Ensemble', 'MC Dropout', 'XGBoost']
 # ============================================================
 CONFIGS = {
     'BasicMLP': dict(
-        thr=0.10, strategy='Simple', qtype='XGB',
+        thr=0.09, strategy='Simple', qtype='MLP',
         npz=os.path.join(config.PROJECT_ROOT, "experiments", "icu24h", "basicmlp", "results", "csv", "calibrated_probs.npz"),
         extra_cols=['prob', 'platt', 'iso'],
     ),
     'Deep Ensemble': dict(
-        thr=0.10, strategy='Simple', qtype='MLP',
+        thr=0.11, strategy='Simple', qtype='MLP',
         npz=os.path.join(config.PROJECT_ROOT, "experiments", "icu24h", "deepensemble", "results", "csv", "calibrated_probs_ensemble.npz"),
         extra_cols=['prob', 'platt', 'iso', 'var', 'ent', 'spr'],
     ),
     'MC Dropout': dict(
-        thr=0.13, strategy='CrossFit', qtype='MLP',
+        thr=0.13, strategy='CrossFit', qtype='XGB',
         npz=os.path.join(config.PROJECT_ROOT, "experiments", "icu24h", "mcdropout", "results", "csv", "calibrated_probs_mc.npz"),
         extra_cols=['prob', 'platt', 'iso', 'var', 'ent'],
     ),
     'XGBoost': dict(
-        thr=0.11, strategy='CrossFit', qtype='LR',
+        thr=0.10, strategy='Simple', qtype='XGB',
         npz=os.path.join(config.PROJECT_ROOT, "experiments", "icu24h", "xgboost", "results", "csv", "calibrated_probs_xgb.npz"),
         extra_cols=['prob', 'platt', 'iso'],
     ),
